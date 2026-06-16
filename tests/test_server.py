@@ -25,15 +25,26 @@ class FakeRequest:
 
 
 class FakeCtx:
-    def __init__(self, odoo):
-        self.request_context = FakeRequest(FakeLife(odoo))
+    def __init__(self, odoo, clients=None):
+        self.request_context = FakeRequest(FakeLife(odoo, clients))
 
 
 class FakeLife:
-    def __init__(self, odoo):
+    def __init__(self, odoo, clients=None):
         self.odoo = odoo
         self.schema_cache = {}
         self.write_approvals = {}
+        self._named_clients = dict(clients or {})
+
+    def get_client(self, instance=None):
+        if not instance:
+            return "default", self.odoo
+        if instance in self._named_clients:
+            return instance, self._named_clients[instance]
+        raise ValueError(
+            f"Unknown Odoo instance {instance!r}. "
+            f"Available instances: {sorted(self._named_clients)}"
+        )
 
 
 def test_server_import_initializes_fastmcp_with_current_sdk_without_lifespan():
@@ -81,9 +92,24 @@ def test_server_registers_expected_tools_and_resources_without_lifespan():
         "health_check",
         "aggregate_records",
         "chatter_post",
+        "list_instances",
+        "lookup_model_history",
+        "read_attachment",
+        "index_knowledge",
+        "search_knowledge",
+        "knowledge_stats",
+        "receivable_payable_aging",
+        "accounting_health_summary",
+        "submit_async_task",
+        "get_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
+        "search_across_instances",
+        "aggregate_across_instances",
+        "accounting_health_across_instances",
     }
     assert expected_tools <= tools
-    assert len(tools) == 24
+    assert len(tools) == 39
     assert "odoo://models" in resources
     assert {
         "odoo://model/{model_name}",
@@ -228,7 +254,7 @@ def test_lifespan_is_lazy_and_preview_tools_call_tool_succeed_when_client_raises
             "methods": [{"model": "res.partner", "method": "write"}],
         },
     )
-    assert upgrade["transport"]["xmlrpc_jsonrpc_deprecation"] == "Odoo 20 fall 2026"
+    assert upgrade["transport"]["xmlrpc_jsonrpc_deprecation"] == "Odoo 22 fall 2028"
 
     fit_gap = call_tool_json(
         server,
@@ -738,7 +764,7 @@ def test_profile_health_and_prompts_are_available():
 
     health = call_tool_json(server, "health_check", {})
     assert health["success"] is True
-    assert health["server"]["tool_count"] == 24
+    assert health["server"]["tool_count"] == 39
     assert health["runtime"]["chatter_direct_enabled"] is False
     assert health["runtime"]["broad_unknown_method_mode"]["enabled"] is False
 
@@ -829,6 +855,28 @@ def test_diagnose_access_reports_acl_rules_and_count_mismatch():
     assert report["access"]["granting_count"] == 1
     assert report["rules"]["group_bound"][0]["name"] == "own contacts"
     assert "record_rule_filter_likely" in codes
+
+
+def test_diagnose_access_classifies_observed_error():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.diagnose_access(
+        FakeCtx(AccessDiagnosticClient(count=1)),
+        "res.partner",
+        "read",
+        observed_error=(
+            "Due to security restrictions, you are not allowed to access "
+            "'Contact' (res.partner) records."
+        ),
+    )
+
+    assert report["success"] is True
+    assert report["error_classification"]["category"] == "record_rule"
+
+    report_without_error = server.diagnose_access(
+        FakeCtx(AccessDiagnosticClient(count=1)), "res.partner", "read"
+    )
+    assert report_without_error["error_classification"] is None
 
 
 def test_diagnose_access_uses_odoo19_group_ids_field():
@@ -1045,10 +1093,7 @@ class _AggregateClient:
             if self.base_latest_version is None:
                 return []
             return [{"latest_version": self.base_latest_version}]
-        if (
-            method == "formatted_read_group"
-            and self.formatted_exception is not None
-        ):
+        if method == "formatted_read_group" and self.formatted_exception is not None:
             raise self.formatted_exception
         return list(self.rows)
 
@@ -1203,9 +1248,7 @@ def test_aggregate_records_requires_group_by():
     server = importlib.import_module("odoo_mcp.server")
     client = _AggregateClient(version="17.0")
 
-    result = server.aggregate_records(
-        FakeCtx(client), model="sale.order", group_by=[]
-    )
+    result = server.aggregate_records(FakeCtx(client), model="sale.order", group_by=[])
 
     assert result["success"] is False
     assert "group_by" in result["error"]
@@ -1283,7 +1326,9 @@ def test_odoo_major_version_parses_saas_server_version_string():
             return {"server_version": "saas~19.1+e"}
 
         def execute_method(self, *args, **kwargs):
-            raise AssertionError("execute_method should not run when metadata is present")
+            raise AssertionError(
+                "execute_method should not run when metadata is present"
+            )
 
     assert server.odoo_major_version(StubClient()) == 19
 
@@ -1338,9 +1383,7 @@ def test_chatter_post_execute_with_valid_approval_posts(monkeypatch):
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
-    preview = server.chatter_post(
-        ctx, model="res.partner", record_id=7, body="Hi"
-    )
+    preview = server.chatter_post(ctx, model="res.partner", record_id=7, body="Hi")
     approved = server.chatter_post(
         ctx,
         model="res.partner",
@@ -1365,9 +1408,7 @@ def test_chatter_post_rejects_token_mismatch(monkeypatch):
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
-    preview = server.chatter_post(
-        ctx, model="res.partner", record_id=7, body="Hi"
-    )
+    preview = server.chatter_post(ctx, model="res.partner", record_id=7, body="Hi")
     bad = server.chatter_post(
         ctx,
         model="res.partner",
@@ -1388,9 +1429,7 @@ def test_chatter_post_requires_confirm_in_gated_mode(monkeypatch):
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
-    preview = server.chatter_post(
-        ctx, model="res.partner", record_id=7, body="Hi"
-    )
+    preview = server.chatter_post(ctx, model="res.partner", record_id=7, body="Hi")
     no_confirm = server.chatter_post(
         ctx,
         model="res.partner",
@@ -1485,13 +1524,63 @@ def test_resolve_read_fields_passes_explicit_fields_through():
 
     class ExplodingClient:
         def get_model_fields(self, model):
-            raise AssertionError("should not call fields_get when caller specifies fields")
+            raise AssertionError(
+                "should not call fields_get when caller specifies fields"
+            )
 
     app_context = FakeLife(ExplodingClient())
     resolved = server.resolve_read_fields(
         app_context, app_context.odoo, "res.partner", ["name", "email"]
     )
     assert resolved == ["name", "email"]
+
+
+def test_lookup_model_history_tool_returns_catalog_match():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = call_tool_json(server, "lookup_model_history", {"name": "account.invoice"})
+    assert report["success"] is True
+    assert report["matches"][0]["new_model"] == "account.move"
+    assert report["metadata_used"]["live_odoo"] is False
+
+
+def test_get_model_fields_relevance_top_returns_ranked_subset():
+    server = importlib.import_module("odoo_mcp.server")
+
+    class WideModelClient:
+        def get_model_fields(self, model):
+            return {
+                "name": {"type": "char", "required": True},
+                "email": {"type": "char"},
+                "note": {"type": "text"},
+                "message_ids": {"type": "one2many"},
+                "image_1920": {"type": "binary"},
+            }
+
+    result = server.get_model_fields(
+        FakeCtx(WideModelClient()), "res.partner", relevance="top", max_fields=2
+    )
+
+    assert result["success"] is True
+    assert result["relevance_applied"] is True
+    assert list(result["result"]) == ["name", "email"]
+    assert result["count"] == 2
+    assert result["ranking"][0]["field"] == "name"
+    assert result["ranking"][0]["score"] > result["ranking"][1]["score"]
+
+
+def test_get_model_fields_rejects_unknown_relevance_mode():
+    server = importlib.import_module("odoo_mcp.server")
+
+    class ExplodingClient:
+        def get_model_fields(self, model):
+            raise AssertionError("must validate relevance before hitting Odoo")
+
+    result = server.get_model_fields(
+        FakeCtx(ExplodingClient()), "res.partner", relevance="bogus"
+    )
+    assert result["success"] is False
+    assert "relevance" in result["error"]
 
 
 def test_aggregate_records_rejects_invalid_model_name():
@@ -1686,8 +1775,8 @@ def test_max_smart_fields_invalid_env_falls_back_to_default(monkeypatch):
 def test_mcp_surface_counts_reports_v030_totals():
     server = importlib.import_module("odoo_mcp.server")
     counts = server.mcp_surface_counts()
-    assert counts["tool_count"] == 24
-    assert counts["prompt_count"] == 5
+    assert counts["tool_count"] == 39
+    assert counts["prompt_count"] == 10
     # 1 fixed resource + 3 templates = 4
     assert counts["resource_count"] == 4
 
@@ -1697,8 +1786,7 @@ def test_new_tools_expose_output_schema_and_annotations():
 
     server = importlib.import_module("odoo_mcp.server")
     tools = {
-        tool.name: tool.model_dump()
-        for tool in asyncio.run(server.mcp.list_tools())
+        tool.name: tool.model_dump() for tool in asyncio.run(server.mcp.list_tools())
     }
 
     aggregate = tools["aggregate_records"]
@@ -1717,7 +1805,13 @@ def test_search_records_and_read_record_response_carry_new_keys():
     client = _SmartFieldsClient()
 
     search = server.search_records(FakeCtx(client), "res.partner", limit=1)
-    for required in ("success", "count", "result", "smart_fields_applied", "fields_used"):
+    for required in (
+        "success",
+        "count",
+        "result",
+        "smart_fields_applied",
+        "fields_used",
+    ):
         assert required in search
 
     read = server.read_record(FakeCtx(client), "res.partner", 1)
@@ -1989,9 +2083,7 @@ def test_odoo_major_version_returns_none_when_get_server_version_returns_non_dic
 def test_normalize_domain_input_accepts_search_domain_object():
     server = importlib.import_module("odoo_mcp.server")
     sd = server.SearchDomain(
-        conditions=[
-            server.DomainCondition(field="name", operator="=", value="Ada")
-        ]
+        conditions=[server.DomainCondition(field="name", operator="=", value="Ada")]
     )
     assert server.normalize_domain_input(sd) == [["name", "=", "Ada"]]
 
@@ -2184,7 +2276,9 @@ def test_available_user_read_fields_returns_base_when_metadata_missing():
 def test_available_user_read_fields_includes_group_fields_when_present():
     server = importlib.import_module("odoo_mcp.server")
     # When the model exposes both groups_id and all_group_ids, we want both
-    fields = server._available_user_read_fields({"id", "name", "groups_id", "all_group_ids"})
+    fields = server._available_user_read_fields(
+        {"id", "name", "groups_id", "all_group_ids"}
+    )
     assert "groups_id" in fields
     assert "all_group_ids" in fields
 
@@ -2560,6 +2654,7 @@ def test_execute_approved_write_rejects_invalid_operation(monkeypatch):
         "record_ids": [7],
         "values": {"name": "Ada"},
         "context": {},
+        "instance": "default",
     }
     token = server.build_approval_token(canonical)
     approval = {**canonical, "token": token}
@@ -2809,8 +2904,7 @@ def test_fit_gap_report_includes_live_metadata_not_used_assumption():
     server = importlib.import_module("odoo_mcp.server")
     report = server.fit_gap_report(["Track contacts"], use_live_metadata=True)
     assert any(
-        "fit_gap_report is input-driven" in str(item)
-        for item in report["assumptions"]
+        "fit_gap_report is input-driven" in str(item) for item in report["assumptions"]
     )
 
 
@@ -2864,7 +2958,11 @@ def test_get_model_fields_tool_filters_by_field_names():
 
     class _Client:
         def get_model_fields(self, model):
-            return {"name": {"type": "char"}, "ref": {"type": "char"}, "active": {"type": "boolean"}}
+            return {
+                "name": {"type": "char"},
+                "ref": {"type": "char"},
+                "active": {"type": "boolean"},
+            }
 
     result = server.get_model_fields(
         FakeCtx(_Client()), "res.partner", field_names=["name", "ref", "ghost"]
@@ -3056,7 +3154,9 @@ def test_search_holidays_rejects_invalid_start_date():
     class _Client:
         pass
 
-    result = server.search_holidays(FakeCtx(_Client()), start_date="garbage", end_date="2024-01-01")
+    result = server.search_holidays(
+        FakeCtx(_Client()), start_date="garbage", end_date="2024-01-01"
+    )
     assert result.success is False
     assert "start_date" in result.error
 
@@ -3199,9 +3299,7 @@ def test_diagnose_access_reports_acl_denied_likely_when_no_granting_rows():
                 return 0
             raise AssertionError(f"unexpected: {model}.{method}")
 
-    report = server.diagnose_access(
-        FakeCtx(_Client()), "res.partner", "read"
-    )
+    report = server.diagnose_access(FakeCtx(_Client()), "res.partner", "read")
     code_names = {c["code"] for c in report["diagnosis"]["codes"]}
     assert "acl_denied_likely" in code_names
 
@@ -3225,9 +3323,7 @@ def test_diagnose_access_reports_metadata_error_when_ir_model_search_fails():
                 return [{"id": 7}]
             raise AssertionError(f"unexpected: {model}.{method}")
 
-    report = server.diagnose_access(
-        FakeCtx(_Client()), "res.partner", "read"
-    )
+    report = server.diagnose_access(FakeCtx(_Client()), "res.partner", "read")
     stages = {err["stage"] for err in report["metadata_errors"]}
     assert "ir.model" in stages
 
@@ -3256,9 +3352,7 @@ def test_diagnose_access_recovers_uid_from_user_context_when_client_lacks_attrib
                 return 1
             raise AssertionError(f"unexpected: {model}.{method}")
 
-    report = server.diagnose_access(
-        FakeCtx(_Client()), "res.partner", "read"
-    )
+    report = server.diagnose_access(FakeCtx(_Client()), "res.partner", "read")
     assert report["current_user"]["uid"] == 7
 
 
@@ -3292,9 +3386,7 @@ def test_diagnose_access_records_user_fields_and_read_errors():
                 return 0
             raise AssertionError(f"unexpected: {model}.{method}")
 
-    report = server.diagnose_access(
-        FakeCtx(_Client()), "res.partner", "read"
-    )
+    report = server.diagnose_access(FakeCtx(_Client()), "res.partner", "read")
     stages = {err["stage"] for err in report["metadata_errors"]}
     assert "res.users.fields_get" in stages or "res.users.read" in stages
 
@@ -3322,15 +3414,19 @@ def test_diagnose_access_skips_non_dict_rule_entries():
                 # Mix dict and non-dict entries to exercise the skip
                 return [
                     "broken",
-                    {"id": 1, "name": "valid", "active": True, "perm_read": True, "groups": False},
+                    {
+                        "id": 1,
+                        "name": "valid",
+                        "active": True,
+                        "perm_read": True,
+                        "groups": False,
+                    },
                 ]
             if model == "res.partner" and method == "search_count":
                 return 1
             raise AssertionError(f"unexpected: {model}.{method}")
 
-    report = server.diagnose_access(
-        FakeCtx(_Client()), "res.partner", "read"
-    )
+    report = server.diagnose_access(FakeCtx(_Client()), "res.partner", "read")
     assert len(report["rules"]["active"]) == 1
 
 
@@ -3449,3 +3545,481 @@ def test_execute_method_normalizes_domain_for_search_methods(monkeypatch):
         args=['[["name","=","Ada"]]'],
     )
     assert captured[0][0] == ("res.partner", "search_read", [["name", "=", "Ada"]])
+
+
+# ----- Multi-instance support (v0.4) ----------------------------------------
+
+
+class _NamedClient:
+    """Minimal fake client that records calls for routing assertions."""
+
+    def __init__(self, label):
+        self.label = label
+        self.calls = []
+
+    def search_read(self, **kwargs):
+        self.calls.append(("search_read", kwargs))
+        return [{"id": 1, "name": self.label}]
+
+    def get_model_fields(self, model):
+        self.calls.append(("get_model_fields", model))
+        return {"name": {"type": "char", "readonly": False}}
+
+    def execute_method(self, *args, **kwargs):
+        self.calls.append(("execute_method", args, kwargs))
+        return {"posted_by": self.label}
+
+
+def test_search_records_routes_to_named_instance():
+    server = importlib.import_module("odoo_mcp.server")
+    default_client = _NamedClient("default")
+    globex_client = _NamedClient("globex")
+    ctx = FakeCtx(default_client, clients={"globex": globex_client})
+
+    result = server.search_records(
+        ctx, "res.partner", fields=["name"], instance="globex"
+    )
+
+    assert result["success"] is True
+    assert result["result"][0]["name"] == "globex"
+    assert globex_client.calls and not default_client.calls
+
+
+def test_tool_with_unknown_instance_returns_error_listing_names():
+    server = importlib.import_module("odoo_mcp.server")
+    ctx = FakeCtx(_NamedClient("default"), clients={"globex": _NamedClient("globex")})
+
+    result = server.search_records(ctx, "res.partner", instance="ghost")
+
+    assert result["success"] is False
+    assert "ghost" in result["error"]
+    assert "globex" in result["error"]
+
+
+def test_schema_cache_is_partitioned_by_instance(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    default_client = _NamedClient("default")
+    globex_client = _NamedClient("globex")
+    ctx = FakeCtx(default_client, clients={"globex": globex_client})
+    app_context = ctx.request_context.lifespan_context
+
+    server.search_records(ctx, "res.partner")
+    server.search_records(ctx, "res.partner", instance="globex")
+
+    cache_keys = set(app_context.schema_cache)
+    assert any(key == "default:res.partner" for key in cache_keys)
+    assert any(key == "globex:res.partner" for key in cache_keys)
+
+
+def test_cross_instance_approval_token_replay_is_rejected(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    default_client = _NamedClient("default")
+    globex_client = _NamedClient("globex")
+    ctx = FakeCtx(default_client, clients={"globex": globex_client})
+
+    validation = server.validate_write(
+        ctx, "res.partner", "write", values={"name": "Ada"}, record_ids=[7]
+    )
+    assert validation["success"] is True
+    assert validation["approval"]["instance"] == "default"
+
+    # Replay the approved token against another instance: hash must not verify.
+    tampered = dict(validation["approval"])
+    tampered["instance"] = "globex"
+    is_valid, _ = server.verify_write_approval(tampered)
+    assert is_valid is False
+
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
+    rejected = server.execute_approved_write(ctx, tampered, confirm=True)
+    assert rejected["success"] is False
+    assert "token" in rejected["error"]
+    assert not globex_client.calls
+
+
+def test_validate_write_tokens_differ_between_instances(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    default_client = _NamedClient("default")
+    globex_client = _NamedClient("globex")
+    ctx = FakeCtx(default_client, clients={"globex": globex_client})
+
+    on_default = server.validate_write(
+        ctx, "res.partner", "write", values={"name": "Ada"}, record_ids=[7]
+    )
+    on_globex = server.validate_write(
+        ctx,
+        "res.partner",
+        "write",
+        values={"name": "Ada"},
+        record_ids=[7],
+        instance="globex",
+    )
+
+    assert on_default["approval"]["token"] != on_globex["approval"]["token"]
+    assert on_globex["approval"]["instance"] == "globex"
+
+
+def test_execute_approved_write_runs_on_instance_named_in_approval(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    default_client = _NamedClient("default")
+    globex_client = _NamedClient("globex")
+    ctx = FakeCtx(default_client, clients={"globex": globex_client})
+
+    validation = server.validate_write(
+        ctx,
+        "res.partner",
+        "write",
+        values={"name": "Ada"},
+        record_ids=[7],
+        instance="globex",
+    )
+    assert validation["success"] is True
+
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
+    result = server.execute_approved_write(ctx, validation["approval"], confirm=True)
+
+    assert result["success"] is True
+    assert result["instance"] == "globex"
+    assert any(call[0] == "execute_method" for call in globex_client.calls)
+    assert not any(call[0] == "execute_method" for call in default_client.calls)
+
+
+def test_chatter_post_tokens_differ_between_instances(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    default_client = _NamedClient("default")
+    globex_client = _NamedClient("globex")
+    ctx = FakeCtx(default_client, clients={"globex": globex_client})
+
+    on_default = server.chatter_post(ctx, "res.partner", 7, "hello")
+    on_globex = server.chatter_post(ctx, "res.partner", 7, "hello", instance="globex")
+
+    assert on_default["mode"] == "preview"
+    assert on_globex["mode"] == "preview"
+    assert on_default["approval"]["token"] != on_globex["approval"]["token"]
+    assert on_globex["approval"]["instance"] == "globex"
+
+
+def test_list_instances_tool_reports_names_without_credentials(monkeypatch, tmp_path):
+    server = importlib.import_module("odoo_mcp.server")
+    for key in (
+        "ODOO_URL",
+        "ODOO_DB",
+        "ODOO_USERNAME",
+        "ODOO_PASSWORD",
+        "ODOO_CONFIG_FILE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "odoo_config.json").write_text(
+        json.dumps(
+            {
+                "default": "acme",
+                "instances": {
+                    "acme": {
+                        "url": "https://acme.odoo.test",
+                        "db": "acme",
+                        "username": "bot",
+                        "api_key": "super-secret-key",
+                        "transport": "json2",
+                    },
+                    "globex": {
+                        "url": "https://globex.odoo.test",
+                        "db": "globex",
+                        "username": "demo",
+                        "password": "super-secret-pass",
+                    },
+                },
+            }
+        )
+    )
+
+    result = call_tool_json(server, "list_instances", {})
+
+    assert result["success"] is True
+    assert result["default"] == "acme"
+    assert result["instance_count"] == 2
+    names = [item["name"] for item in result["instances"]]
+    assert names == ["acme", "globex"]
+    serialized = json.dumps(result)
+    assert "super-secret-key" not in serialized
+    assert "super-secret-pass" not in serialized
+
+
+def test_health_check_reports_instance_posture(monkeypatch, tmp_path):
+    server = importlib.import_module("odoo_mcp.server")
+    for key in (
+        "ODOO_URL",
+        "ODOO_DB",
+        "ODOO_USERNAME",
+        "ODOO_PASSWORD",
+        "ODOO_CONFIG_FILE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "odoo_config.json").write_text(
+        json.dumps(
+            {
+                "default": "acme",
+                "instances": {
+                    "acme": {"url": "https://acme.odoo.test", "db": "acme"},
+                    "globex": {"url": "https://globex.odoo.test", "db": "globex"},
+                },
+            }
+        )
+    )
+
+    health = call_tool_json(server, "health_check", {})
+
+    assert health["runtime"]["odoo_instances"] == {
+        "instance_count": 2,
+        "default_instance": "acme",
+    }
+
+
+def test_preview_write_offline_accepts_instance_when_no_config(monkeypatch):
+    """Offline preview must still mint an instance-bound token without config."""
+    server = importlib.import_module("odoo_mcp.server")
+
+    def no_config():
+        raise FileNotFoundError("no config in offline preview")
+
+    monkeypatch.setattr(server, "load_instances_config", no_config)
+    preview = server.preview_write(
+        "res.partner",
+        "write",
+        values={"name": "Ada"},
+        record_ids=[7],
+        instance="globex",
+    )
+
+    assert preview["success"] is True
+    assert preview["approval"]["instance"] == "globex"
+    assert preview["approval"]["token"].startswith("odoo-write:")
+
+
+def test_preview_write_rejects_unknown_instance_when_config_present(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(
+        server,
+        "load_instances_config",
+        lambda: ("acme", {"acme": {}, "globex": {}}),
+    )
+
+    preview = server.preview_write(
+        "res.partner",
+        "write",
+        values={"name": "Ada"},
+        record_ids=[7],
+        instance="ghost",
+    )
+
+    assert preview["success"] is False
+    assert "ghost" in preview["error"]
+    assert "acme" in preview["error"] and "globex" in preview["error"]
+
+
+def test_validate_write_with_input_metadata_binds_instance_without_client(monkeypatch):
+    """Caller-supplied metadata path must bind the token without touching Odoo."""
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+
+    class _Untouchable:
+        def __getattr__(self, name):
+            raise AssertionError("client must not be used with input metadata")
+
+    ctx = FakeCtx(_Untouchable(), clients={})
+    # FakeLife.get_client would raise for unknown names; bypass config validation.
+    monkeypatch.setattr(server, "resolve_instance_name", lambda name: name or "default")
+
+    report = server.validate_write(
+        ctx,
+        "res.partner",
+        "write",
+        values={"name": "Ada"},
+        record_ids=[7],
+        fields_metadata={"name": {"type": "char", "readonly": False}},
+        instance="globex",
+    )
+
+    assert report["success"] is True
+    assert report["approval"]["instance"] == "globex"
+    # Input metadata never authorizes execution.
+    assert report["approval_status"]["stored"] is False
+
+
+def test_execute_approved_write_rejects_legacy_token_without_instance(monkeypatch):
+    """A 0.3.x-style approval (no instance key) hashes differently and must fail."""
+    server = importlib.import_module("odoo_mcp.server")
+
+    class _Client:
+        def execute_method(self, *args, **kwargs):
+            raise AssertionError("legacy token must fail before execution")
+
+    legacy_payload = {
+        "model": "res.partner",
+        "operation": "write",
+        "record_ids": [7],
+        "values": {"name": "Ada"},
+        "context": {},
+    }
+    legacy_token = server.build_approval_token(legacy_payload)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
+
+    result = server.execute_approved_write(
+        FakeCtx(_Client()),
+        {**legacy_payload, "token": legacy_token},
+        confirm=True,
+    )
+
+    assert result["success"] is False
+    assert "token" in result["error"]
+
+
+def test_app_context_get_client_reuses_cached_named_client(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+    built = []
+
+    def fake_get_odoo_client_for(name):
+        built.append(name)
+        return name, object()
+
+    monkeypatch.setattr(server, "get_odoo_client_for", fake_get_odoo_client_for)
+    app_context = server.AppContext()
+
+    name1, client1 = app_context.get_client("globex")
+    name2, client2 = app_context.get_client("globex")
+
+    assert name1 == name2 == "globex"
+    assert client1 is client2
+    assert built == ["globex"]
+
+
+def test_execute_approved_write_never_echoes_expected_token():
+    """Token mismatch must not return the correct token (minting oracle)."""
+    server = importlib.import_module("odoo_mcp.server")
+
+    class _Client:
+        def execute_method(self, *args, **kwargs):
+            raise AssertionError("mismatched token must fail before execution")
+
+    tampered = {
+        "model": "res.partner",
+        "operation": "write",
+        "record_ids": [7],
+        "values": {"name": "Ada"},
+        "context": {},
+        "instance": "default",
+        "token": "odoo-write:forged",
+    }
+    result = server.execute_approved_write(FakeCtx(_Client()), tampered, confirm=True)
+
+    assert result["success"] is False
+    assert "expected_token" not in result
+    assert "odoo-write:" not in json.dumps(result)
+
+
+# ----- Free-text query= on search_records -----
+
+
+class _QuerySearchClient:
+    """Recording client capturing the domain search_records sends."""
+
+    def __init__(self):
+        self.fields_meta = {
+            "id": {"type": "integer"},
+            "name": {"type": "char", "searchable": True},
+            "email": {"type": "char", "searchable": True},
+            "state": {"type": "selection", "searchable": True},
+        }
+        self.search_read_calls = []
+
+    def get_model_fields(self, model):
+        return self.fields_meta
+
+    def search_read(self, model_name, domain, fields=None, **kwargs):
+        self.search_read_calls.append({"model": model_name, "domain": domain})
+        return [{"id": 1, "name": "Ada"}]
+
+
+def test_search_records_query_builds_or_ilike_domain():
+    server = importlib.import_module("odoo_mcp.server")
+    client = _QuerySearchClient()
+
+    result = server.search_records(
+        FakeCtx(client),
+        "res.partner",
+        domain=[["state", "=", "done"]],
+        query="ada",
+    )
+
+    assert result["success"] is True
+    assert result["query_fields_used"] == ["name", "email"]
+    sent = client.search_read_calls[0]["domain"]
+    assert sent == [
+        "|",
+        ["name", "ilike", "ada"],
+        ["email", "ilike", "ada"],
+        ["state", "=", "done"],
+    ]
+
+
+def test_search_records_blank_query_is_ignored():
+    server = importlib.import_module("odoo_mcp.server")
+    client = _QuerySearchClient()
+
+    result = server.search_records(FakeCtx(client), "res.partner", query="   ")
+
+    assert result["success"] is True
+    assert "query_fields_used" not in result
+    assert client.search_read_calls[0]["domain"] == []
+
+
+def test_search_records_query_falls_back_to_name_without_metadata():
+    server = importlib.import_module("odoo_mcp.server")
+    client = _QuerySearchClient()
+    client.fields_meta = {"error": "boom"}
+
+    result = server.search_records(FakeCtx(client), "res.partner", query="ada")
+
+    assert result["success"] is True
+    assert result["query_fields_used"] == ["name"]
+    assert client.search_read_calls[0]["domain"] == [["name", "ilike", "ada"]]
+
+
+def test_legacy_names_remain_importable_from_server():
+    """Helpers moved out in the 0.8 refactor must stay importable from server."""
+    server = importlib.import_module("odoo_mcp.server")
+    legacy_names = [
+        "MODEL_NAME_RE",
+        "METHOD_NAME_RE",
+        "MAX_SEARCH_LIMIT",
+        "POLICY_FILE_ENV",
+        "DEFAULT_POLICY_FILENAME",
+        "policy_file_path",
+        "_AGGREGATION_FUNCTIONS",
+        "BoundedTTLCache",
+        "DomainCondition",
+        "SearchDomain",
+        "normalize_domain_input",
+        "clamp_limit",
+        "validate_model_name",
+        "validate_method_name",
+        "parse_measure_spec",
+        "parse_odoo_major_version",
+        "odoo_major_version",
+        "max_attachment_bytes",
+        "truthy_env",
+        "writes_enabled",
+        "allowed_side_effect_methods",
+        "side_effect_method_allowed",
+        "chatter_direct_enabled",
+        "load_side_effect_policy",
+        "access_permission_field",
+    ]
+    missing = [name for name in legacy_names if not hasattr(server, name)]
+    assert missing == []

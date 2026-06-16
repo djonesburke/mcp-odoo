@@ -246,6 +246,7 @@ def test_verify_write_approval_returns_true_for_matching_token():
         "record_ids": [7],
         "values": {"name": "Ada"},
         "context": {},
+        "instance": "default",
     }
     token = agent_tools.build_approval_token(canonical)
     is_valid, _ = agent_tools.verify_write_approval({**canonical, "token": token})
@@ -325,7 +326,10 @@ def test_validate_write_skips_non_dict_metadata_entries_when_iterating_required(
         operation="create",
         values={"name": "Ada"},
         record_ids=None,
-        fields_metadata={"name": {"type": "char", "readonly": False, "required": True}, "broken": "not-a-dict"},
+        fields_metadata={
+            "name": {"type": "char", "readonly": False, "required": True},
+            "broken": "not-a-dict",
+        },
     )
     assert report["success"] is True
 
@@ -565,10 +569,10 @@ def test_scan_xml_file_detects_automated_action_and_view(tmp_path):
     xml = tmp_path / "data.xml"
     xml.write_text(
         '<?xml version="1.0"?>\n'
-        '<odoo>\n'
+        "<odoo>\n"
         '  <record id="cron1" model="ir.cron"/>\n'
         '  <record id="view1" model="ir.ui.view"/>\n'
-        '</odoo>\n',
+        "</odoo>\n",
         encoding="utf-8",
     )
     findings = agent_tools._scan_xml_file(xml)
@@ -749,6 +753,87 @@ def test_select_smart_fields_does_not_duplicate_when_already_selected():
     assert selected.count("name") == 1
 
 
+def test_lookup_model_history_resolves_old_name_to_new_model():
+    report = agent_tools.lookup_model_history_report("account.invoice")
+    assert report["success"] is True
+    assert report["match_type"] == "exact"
+    assert report["matches"][0]["new_model"] == "account.move"
+    assert any("account.move" in line for line in report["guidance"])
+
+
+def test_lookup_model_history_recognizes_current_name():
+    report = agent_tools.lookup_model_history_report("discuss.channel")
+    assert report["match_type"] == "exact"
+    assert any("mail.channel" in line for line in report["guidance"])
+
+
+def test_lookup_model_history_reports_removed_models():
+    report = agent_tools.lookup_model_history_report("account.chart.template")
+    assert report["match_type"] == "exact"
+    assert report["matches"][0]["kind"] == "removed"
+    assert report["matches"][0]["new_model"] is None
+
+
+def test_lookup_model_history_partial_and_no_match():
+    partial = agent_tools.lookup_model_history_report("mass_mailing")
+    assert partial["match_type"] == "partial"
+    assert partial["matches"]
+
+    missing = agent_tools.lookup_model_history_report("res.partner")
+    assert missing["match_type"] == "none"
+    assert missing["matches"] == []
+    assert any("list_models" in line for line in missing["guidance"])
+
+
+def test_lookup_model_history_rejects_empty_name():
+    report = agent_tools.lookup_model_history_report("   ")
+    assert report["success"] is False
+
+
+def test_model_rename_catalog_entries_are_well_formed():
+    catalog = agent_tools.load_model_rename_catalog()
+    assert catalog["entries"]
+    for entry in catalog["entries"]:
+        assert entry["old_model"]
+        assert entry["kind"] in {"renamed", "removed", "replaced", "merged"}
+        assert entry["changed_in"]
+        if entry["kind"] == "removed":
+            assert entry["new_model"] is None
+        else:
+            assert entry["new_model"]
+
+
+def test_rank_relevant_fields_boosts_required_and_searchable():
+    fields = {
+        "note": _meta("text"),
+        "required_note": _meta("text", required=True),
+        "searchable_note": _meta("text", searchable=True),
+    }
+    ranking = agent_tools.rank_relevant_fields(fields)
+    ordered = [entry["field"] for entry in ranking]
+    assert ordered == ["required_note", "searchable_note", "note"]
+    scores = {entry["field"]: entry["score"] for entry in ranking}
+    assert scores["required_note"] == scores["note"] + 30
+    assert scores["searchable_note"] == scores["note"] + 5
+
+
+def test_rank_relevant_fields_skips_technical_binary_and_corrupt_metadata():
+    fields = {
+        "name": _meta(),
+        "message_ids": _meta("one2many"),
+        "image_1920": _meta("binary"),
+        "broken": "not-a-dict",
+    }
+    ranking = agent_tools.rank_relevant_fields(fields)
+    assert [entry["field"] for entry in ranking] == ["name"]
+
+
+def test_rank_relevant_fields_respects_max_fields_cap():
+    fields = {f"field_{i}": _meta() for i in range(40)}
+    assert len(agent_tools.rank_relevant_fields(fields, max_fields=5)) == 5
+    assert agent_tools.rank_relevant_fields(fields, max_fields=0) == []
+
+
 def test_smart_field_score_falls_through_to_default_for_unknown_types():
     # Field type not matching any priority branch returns 10
     score = agent_tools._smart_field_score("custom_thing", {"type": "reference"})
@@ -756,12 +841,8 @@ def test_smart_field_score_falls_through_to_default_for_unknown_types():
 
 
 def test_smart_field_score_assigns_low_score_to_one2many_many2many_relations():
-    assert (
-        agent_tools._smart_field_score("members", {"type": "one2many"}) == 5
-    )
-    assert (
-        agent_tools._smart_field_score("tags", {"type": "many2many"}) == 5
-    )
+    assert agent_tools._smart_field_score("members", {"type": "one2many"}) == 5
+    assert agent_tools._smart_field_score("tags", {"type": "many2many"}) == 5
 
 
 # ----- _scan_python_file path / scan_addons_source path coverage --------
@@ -795,9 +876,7 @@ def test_scan_addons_source_handles_stat_oserror(monkeypatch, tmp_path):
         if self == target and not raised["done"]:
             # Allow the first 2 calls (is_file + is_symlink) to succeed;
             # raise on the third call which is the explicit size check.
-            stat_with_oserror.calls = (
-                getattr(stat_with_oserror, "calls", 0) + 1
-            )
+            stat_with_oserror.calls = getattr(stat_with_oserror, "calls", 0) + 1
             if stat_with_oserror.calls >= 3:
                 raised["done"] = True
                 raise OSError("simulated stat failure")
@@ -954,3 +1033,84 @@ def test_expr_name_returns_empty_for_unsupported_node_type():
     # ast.Subscript is not Name or Attribute → returns ""
     expr = _ast.parse("a[0]").body[0].value
     assert agent_tools._expr_name(expr) == ""
+
+
+# ----- Free-text query domain helpers -----
+
+
+def test_select_text_query_fields_prefers_identifier_columns():
+    fields = {
+        "name": _meta(searchable=True),
+        "email": _meta(searchable=True),
+        "comment": _meta("text", searchable=True),
+        "state": _meta("selection", searchable=True),
+        "partner_id": _meta("many2one", searchable=True),
+    }
+    selected = agent_tools.select_text_query_fields(fields)
+    assert selected[0] == "name"
+    assert "email" in selected
+    assert "state" not in selected
+    assert "partner_id" not in selected
+
+
+def test_select_text_query_fields_skips_unsearchable_fields():
+    fields = {
+        "name": _meta(searchable=False, store=False),
+        "ref": _meta(searchable=True),
+    }
+    assert agent_tools.select_text_query_fields(fields) == ["ref"]
+
+
+def test_select_text_query_fields_falls_back_to_scored_text_fields():
+    fields = {
+        "description": _meta("text", searchable=True),
+        "note": _meta("text", searchable=True),
+    }
+    selected = agent_tools.select_text_query_fields(fields)
+    assert selected == ["description", "note"]
+
+
+def test_select_text_query_fields_caps_and_zero_max():
+    fields = {
+        name: _meta(searchable=True)
+        for name in ("name", "ref", "email", "phone", "mobile", "barcode", "login")
+    }
+    assert len(agent_tools.select_text_query_fields(fields, max_fields=3)) == 3
+    assert agent_tools.select_text_query_fields(fields, max_fields=0) == []
+
+
+def test_build_text_query_domain_single_field_has_no_or_prefix():
+    domain, used = agent_tools.build_text_query_domain(
+        "acme", {"name": _meta(searchable=True)}
+    )
+    assert used == ["name"]
+    assert domain == [["name", "ilike", "acme"]]
+
+
+def test_build_text_query_domain_prefix_notation_for_multiple_fields():
+    fields = {
+        "name": _meta(searchable=True),
+        "email": _meta(searchable=True),
+        "ref": _meta(searchable=True),
+    }
+    domain, used = agent_tools.build_text_query_domain("  Ada  ", fields)
+    assert used == ["name", "ref", "email"]
+    assert domain[:2] == ["|", "|"]
+    assert domain[2:] == [
+        ["name", "ilike", "Ada"],
+        ["ref", "ilike", "Ada"],
+        ["email", "ilike", "Ada"],
+    ]
+
+
+def test_build_text_query_domain_falls_back_to_name():
+    domain, used = agent_tools.build_text_query_domain("ada", {})
+    assert used == ["name"]
+    assert domain == [["name", "ilike", "ada"]]
+
+
+def test_build_text_query_domain_rejects_blank_query():
+    import pytest
+
+    with pytest.raises(ValueError):
+        agent_tools.build_text_query_domain("   ", {"name": _meta()})

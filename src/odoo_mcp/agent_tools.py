@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+from importlib import resources
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -81,15 +82,26 @@ def build_approval_token(payload: dict[str, Any]) -> str:
     return f"odoo-write:{digest[:32]}"
 
 
+MAX_WRITE_BATCH_SIZE = 100
+
+
 def build_write_preview_report(
     *,
     model: str,
     operation: str,
     values: dict[str, Any] | None = None,
+    values_list: list[dict[str, Any]] | None = None,
     record_ids: list[int] | None = None,
     context: dict[str, Any] | None = None,
+    instance: str = "default",
 ) -> dict[str, Any]:
-    """Build a non-executing preview for standard ORM write operations."""
+    """Build a non-executing preview for standard ORM write operations.
+
+    Batch create: pass ``values_list`` (one dict per record). It maps to
+    Odoo's native ``create(vals_list)`` — a single atomic call. Per-record
+    differing values for ``write`` are deliberately unsupported: they would
+    need one RPC call per record without transactional atomicity.
+    """
     normalized_operation = operation.strip().lower()
     issues: list[dict[str, str]] = []
     if normalized_operation not in WRITE_OPERATIONS:
@@ -102,8 +114,61 @@ def build_write_preview_report(
         )
 
     normalized_values = dict(values or {})
+    normalized_values_list = (
+        [dict(entry) if isinstance(entry, dict) else entry for entry in values_list]
+        if values_list is not None
+        else None
+    )
     normalized_ids = [int(record_id) for record_id in record_ids or []]
-    if normalized_operation == "create" and not normalized_values:
+    if normalized_values_list is not None:
+        if normalized_operation != "create":
+            issues.append(
+                {
+                    "code": "values_list_unsupported_operation",
+                    "severity": "error",
+                    "message": (
+                        "values_list is only supported for create; per-record "
+                        "write values would require non-atomic per-record calls."
+                    ),
+                }
+            )
+        if normalized_values:
+            issues.append(
+                {
+                    "code": "values_and_values_list",
+                    "severity": "error",
+                    "message": "Pass either values or values_list, not both.",
+                }
+            )
+        if not normalized_values_list:
+            issues.append(
+                {
+                    "code": "empty_values_list",
+                    "severity": "error",
+                    "message": "values_list must contain at least one record.",
+                }
+            )
+        elif len(normalized_values_list) > MAX_WRITE_BATCH_SIZE:
+            issues.append(
+                {
+                    "code": "values_list_too_large",
+                    "severity": "error",
+                    "message": (
+                        f"values_list holds {len(normalized_values_list)} records; "
+                        f"the cap is {MAX_WRITE_BATCH_SIZE} per approval."
+                    ),
+                }
+            )
+        for index, entry in enumerate(normalized_values_list):
+            if not isinstance(entry, dict) or not entry:
+                issues.append(
+                    {
+                        "code": "invalid_values_list_entry",
+                        "severity": "error",
+                        "message": f"values_list[{index}] must be a non-empty object.",
+                    }
+                )
+    elif normalized_operation == "create" and not normalized_values:
         issues.append(
             {
                 "code": "missing_create_values",
@@ -134,7 +199,11 @@ def build_write_preview_report(
         "record_ids": normalized_ids,
         "values": normalized_values,
         "context": dict(context or {}),
+        "instance": instance or "default",
     }
+    if normalized_values_list is not None:
+        # Key only present for batches so single-write tokens stay unchanged.
+        canonical_payload["values_list"] = normalized_values_list
     approval_token = build_approval_token(canonical_payload)
 
     return {
@@ -167,9 +236,63 @@ def verify_write_approval(approval: dict[str, Any]) -> tuple[bool, str]:
         "record_ids": approval.get("record_ids") or [],
         "values": approval.get("values") or {},
         "context": approval.get("context") or {},
+        "instance": approval.get("instance") or "default",
     }
+    if approval.get("values_list") is not None:
+        payload["values_list"] = approval.get("values_list")
     expected = build_approval_token(payload)
     return token == expected, expected
+
+
+def _metadata_issues_for_values(
+    values: dict[str, Any],
+    fields_metadata: dict[str, Any],
+    *,
+    label: str = "",
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Check one values dict against fields_get metadata."""
+    issues: list[dict[str, str]] = []
+    hints: list[dict[str, str]] = []
+    prefix = f"{label}: " if label else ""
+    for field_name in sorted(values):
+        meta = fields_metadata.get(field_name)
+        if not isinstance(meta, dict):
+            issues.append(
+                {
+                    "code": "unknown_field",
+                    "severity": "error",
+                    "message": (
+                        f"{prefix}{field_name!r} is not present in fields_get metadata."
+                    ),
+                }
+            )
+            continue
+        field_type = str(meta.get("type", ""))
+        if meta.get("readonly"):
+            issues.append(
+                {
+                    "code": "readonly_field",
+                    "severity": "error",
+                    "message": (
+                        f"{prefix}{field_name!r} is readonly in fields_get metadata."
+                    ),
+                }
+            )
+        elif field_type == "many2one":
+            hints.append(
+                {
+                    "field": field_name,
+                    "hint": "many2one values should be record IDs.",
+                }
+            )
+        elif field_type in {"many2many", "one2many"}:
+            hints.append(
+                {
+                    "field": field_name,
+                    "hint": "relational values should use Odoo command lists.",
+                }
+            )
+    return issues, hints
 
 
 def validate_write_report(
@@ -178,58 +301,43 @@ def validate_write_report(
     operation: str,
     values: dict[str, Any] | None,
     record_ids: list[int] | None,
+    values_list: list[dict[str, Any]] | None = None,
     context: dict[str, Any] | None = None,
     fields_metadata: dict[str, Any] | None = None,
     metadata_source: str = "none",
+    instance: str = "default",
 ) -> dict[str, Any]:
     """Validate write payload shape against optional fields_get metadata."""
     preview = build_write_preview_report(
         model=model,
         operation=operation,
         values=values,
+        values_list=values_list,
         record_ids=record_ids,
         context=context,
+        instance=instance,
     )
     issues: list[dict[str, str]] = list(preview["issues"])
     field_hints: list[dict[str, str]] = []
     normalized_values = dict(values or {})
     if fields_metadata is not None:
-        for field_name in sorted(normalized_values):
-            meta = fields_metadata.get(field_name)
-            if not isinstance(meta, dict):
-                issues.append(
-                    {
-                        "code": "unknown_field",
-                        "severity": "error",
-                        "message": f"{field_name!r} is not present in fields_get metadata.",
-                    }
+        if values_list is not None:
+            for index, entry in enumerate(values_list):
+                if not isinstance(entry, dict):
+                    continue  # preview already flagged the entry shape
+                entry_issues, entry_hints = _metadata_issues_for_values(
+                    entry, fields_metadata, label=f"values_list[{index}]"
                 )
-                continue
-            field_type = str(meta.get("type", ""))
-            if meta.get("readonly"):
-                issues.append(
-                    {
-                        "code": "readonly_field",
-                        "severity": "error",
-                        "message": f"{field_name!r} is readonly in fields_get metadata.",
-                    }
-                )
-            elif field_type == "many2one":
-                field_hints.append(
-                    {
-                        "field": field_name,
-                        "hint": "many2one values should be record IDs.",
-                    }
-                )
-            elif field_type in {"many2many", "one2many"}:
-                field_hints.append(
-                    {
-                        "field": field_name,
-                        "hint": "relational values should use Odoo command lists.",
-                    }
-                )
+                issues.extend(entry_issues)
+                field_hints.extend(entry_hints)
+        else:
+            value_issues, value_hints = _metadata_issues_for_values(
+                normalized_values, fields_metadata
+            )
+            issues.extend(value_issues)
+            field_hints.extend(value_hints)
 
-        if operation == "create":
+        if operation == "create" and values_list is None:
             for field_name, raw_meta in sorted(fields_metadata.items()):
                 if not isinstance(raw_meta, dict):
                     continue
@@ -266,8 +374,11 @@ def _write_execute_method_args(payload: dict[str, Any]) -> dict[str, Any]:
     operation = str(payload["operation"])
     context = payload.get("context") or {}
     kwargs = {"context": context} if context else {}
-    if operation == "create":
-        args: list[Any] = [payload.get("values") or {}]
+    if operation == "create" and payload.get("values_list") is not None:
+        # Odoo's create accepts a vals_list natively — one atomic call.
+        args: list[Any] = [payload.get("values_list") or []]
+    elif operation == "create":
+        args = [payload.get("values") or {}]
     elif operation == "write":
         args = [payload.get("record_ids") or [], payload.get("values") or {}]
     elif operation == "unlink":
@@ -922,8 +1033,10 @@ def _is_skip_metadata(meta: dict[str, Any]) -> bool:
         return True
     if meta.get("compute") and not meta.get("store", True):
         return True
-    if field_type in {"one2many", "many2many"} and meta.get("compute") and not meta.get(
-        "store", True
+    if (
+        field_type in {"one2many", "many2many"}
+        and meta.get("compute")
+        and not meta.get("store", True)
     ):  # pragma: no cover - already handled by the generic compute+!store branch above
         return True
     return False
@@ -949,6 +1062,41 @@ def _smart_field_score(field_name: str, meta: dict[str, Any]) -> int:
     if field_type in {"one2many", "many2many"}:
         return 5
     return 10
+
+
+DEFAULT_MAX_RELEVANT_FIELDS = 30
+
+
+def rank_relevant_fields(
+    fields_metadata: dict[str, Any],
+    max_fields: int = DEFAULT_MAX_RELEVANT_FIELDS,
+) -> list[dict[str, Any]]:
+    """Rank fields by business relevance for schema exploration.
+
+    Builds on the smart-field heuristics and boosts fields that are
+    required or searchable, so agents inspecting wide models (res.partner
+    has hundreds of fields) can start from the ones that matter.
+    """
+    if max_fields <= 0:
+        return []
+
+    scored: list[dict[str, Any]] = []
+    for field_name, raw_meta in fields_metadata.items():
+        if not isinstance(raw_meta, dict):
+            continue
+        if _is_technical_field_name(field_name):
+            continue
+        if _is_skip_metadata(raw_meta):
+            continue
+        score = _smart_field_score(field_name, raw_meta)
+        if raw_meta.get("required"):
+            score += 30
+        if raw_meta.get("searchable"):
+            score += 5
+        scored.append({"field": field_name, "score": score})
+
+    scored.sort(key=lambda item: (-item["score"], item["field"]))
+    return scored[:max_fields]
 
 
 def select_smart_fields(
@@ -992,7 +1140,178 @@ def select_smart_fields(
     for _, name in candidates:
         if len(selected) >= max_fields:
             break
-        if name in selected:  # pragma: no cover - defensive; forced names are pre-filtered from candidates
+        if (
+            name in selected
+        ):  # pragma: no cover - defensive; forced names are pre-filtered from candidates
             continue
         selected.append(name)
     return selected
+
+
+DEFAULT_MAX_QUERY_FIELDS = 5
+
+# Identifier-style columns checked first when building a free-text query
+# domain; ordered by how often they hold the text a human searches for.
+_TEXT_QUERY_PRIORITY_FIELDS = (
+    "name",
+    "display_name",
+    "complete_name",
+    "default_code",
+    "ref",
+    "code",
+    "email",
+    "phone",
+    "mobile",
+    "barcode",
+    "login",
+)
+
+
+def select_text_query_fields(
+    fields_metadata: dict[str, Any],
+    max_fields: int = DEFAULT_MAX_QUERY_FIELDS,
+) -> list[str]:
+    """Pick searchable text fields for a free-text query, identifiers first.
+
+    Only ``char``/``text`` fields that Odoo reports as searchable qualify.
+    Known identifier columns (name, ref, email, ...) win; otherwise the
+    highest-scoring text fields by the smart-field heuristics are used.
+    """
+    if max_fields <= 0:
+        return []
+
+    searchable: dict[str, dict[str, Any]] = {}
+    for field_name, raw_meta in fields_metadata.items():
+        if not isinstance(raw_meta, dict):
+            continue
+        if str(raw_meta.get("type", "")) not in {"char", "text"}:
+            continue
+        if not raw_meta.get("searchable", raw_meta.get("store", True)):
+            continue
+        searchable[field_name] = raw_meta
+
+    selected = [name for name in _TEXT_QUERY_PRIORITY_FIELDS if name in searchable]
+    if not selected and searchable:
+        selected = sorted(
+            searchable,
+            key=lambda name: (-_smart_field_score(name, searchable[name]), name),
+        )
+    return selected[:max_fields]
+
+
+def build_text_query_domain(
+    query: str,
+    fields_metadata: dict[str, Any] | None = None,
+    max_fields: int = DEFAULT_MAX_QUERY_FIELDS,
+) -> tuple[list[Any], list[str]]:
+    """Build an OR ``ilike`` domain matching ``query`` across text fields.
+
+    Returns ``(domain, fields_used)`` where the domain is in Odoo prefix
+    notation (``['|', '|', term, term, term]``) and safe to concatenate
+    with another domain under Odoo's implicit AND. Falls back to ``name``
+    when no metadata is available (``display_name`` is not searchable on
+    Odoo 16). SQL LIKE wildcards (``%``, ``_``) in the query are passed
+    through unescaped, matching Odoo's own search-bar behavior.
+    """
+    cleaned = str(query).strip()
+    if not cleaned:
+        raise ValueError("query must be a non-empty string")
+
+    field_names = select_text_query_fields(fields_metadata or {}, max_fields)
+    if not field_names:
+        field_names = ["name"]
+
+    domain: list[Any] = ["|"] * (len(field_names) - 1)
+    domain.extend([field_name, "ilike", cleaned] for field_name in field_names)
+    return domain, field_names
+
+
+# Model rename history — static catalog of well-known Odoo model renames and
+# removals, so agents stop hallucinating pre-rename names (account.invoice,
+# mail.channel, ...) against modern databases.
+
+_RENAME_CATALOG_CACHE: dict[str, Any] | None = None
+
+
+def load_model_rename_catalog() -> dict[str, Any]:
+    """Load the packaged rename catalog (cached after first read)."""
+    global _RENAME_CATALOG_CACHE
+    if _RENAME_CATALOG_CACHE is None:
+        raw = (
+            resources.files("odoo_mcp")
+            .joinpath("data/odoo_renames.json")
+            .read_text(encoding="utf-8")
+        )
+        _RENAME_CATALOG_CACHE = json.loads(raw)
+    return _RENAME_CATALOG_CACHE
+
+
+def lookup_model_history_report(name: str) -> dict[str, Any]:
+    """Look up rename/removal history for a model name (old or new)."""
+    catalog = load_model_rename_catalog()
+    entries = catalog.get("entries", [])
+    normalized = name.strip().lower()
+    if not normalized:
+        return {
+            "success": False,
+            "tool": "lookup_model_history",
+            "error": "name must be a non-empty model name like 'account.invoice'",
+        }
+
+    exact = [
+        entry
+        for entry in entries
+        if normalized in (entry.get("old_model"), entry.get("new_model"))
+    ]
+    matches = exact
+    match_type = "exact" if exact else "none"
+    if not exact:
+        partial = [
+            entry
+            for entry in entries
+            if normalized in str(entry.get("old_model") or "")
+            or normalized in str(entry.get("new_model") or "")
+        ]
+        if partial:
+            matches = partial
+            match_type = "partial"
+
+    guidance: list[str] = []
+    for entry in matches:
+        if entry.get("old_model") == normalized or match_type == "partial":
+            if entry.get("new_model"):
+                guidance.append(
+                    f"{entry['old_model']} was {entry['kind']} in Odoo "
+                    f"{entry['changed_in']}; use {entry['new_model']} instead."
+                )
+            else:
+                guidance.append(
+                    f"{entry['old_model']} was removed in Odoo "
+                    f"{entry['changed_in']}; {entry.get('notes', '')}".strip()
+                )
+        elif entry.get("new_model") == normalized:
+            guidance.append(
+                f"{normalized} is the current name; it was previously "
+                f"{entry['old_model']} (changed in Odoo {entry['changed_in']})."
+            )
+    if match_type == "none":
+        guidance.append(
+            "No rename history found in the curated catalog. The name may be "
+            "current, custom, or missing from the catalog — verify with "
+            "list_models or schema_catalog."
+        )
+
+    return {
+        "success": True,
+        "tool": "lookup_model_history",
+        "query": name,
+        "match_type": match_type,
+        "matches": matches,
+        "guidance": guidance,
+        "catalog": {
+            "catalog_version": catalog.get("catalog_version"),
+            "entry_count": len(entries),
+            "coverage_note": catalog.get("coverage_note"),
+        },
+        "metadata_used": {"live_odoo": False, "source": "static_catalog"},
+    }
