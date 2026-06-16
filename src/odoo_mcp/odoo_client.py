@@ -6,7 +6,6 @@ the External JSON-2 API by setting ``ODOO_TRANSPORT=json2`` and an API key.
 """
 
 import http.client
-import importlib.metadata
 import json
 import os
 import re
@@ -22,11 +21,6 @@ from typing import Any, cast
 from .diagnostics import JSON2_POSITIONAL_ARG_MAP, sanitize_odoo_error
 
 SUPPORTED_TRANSPORTS = {"xmlrpc", "json2"}
-
-try:
-    _DEFAULT_USER_AGENT = f"odoo-mcp/{importlib.metadata.version('odoo-mcp')}"
-except importlib.metadata.PackageNotFoundError:
-    _DEFAULT_USER_AGENT = "odoo-mcp/unknown"
 
 
 class OdooJson2Error(ValueError):
@@ -250,7 +244,6 @@ class OdooClient:
             "Authorization": f"bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "User-Agent": os.environ.get("MCP_USER_AGENT", _DEFAULT_USER_AGENT),
         }
         if self.json2_database_header and self.db:
             headers["X-Odoo-Database"] = self.db
