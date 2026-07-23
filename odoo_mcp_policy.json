@@ -4,45 +4,113 @@
     "default": {
       "hr.employee": {
         "deny": [
-          "identification_id", "passport_id", "ssnid", "sinid", "visa_no", "permit_no",
-          "birthday", "place_of_birth", "country_of_birth",
-          "private_street", "private_street2", "private_city", "private_zip",
-          "private_state_id", "private_country_id", "private_email", "private_phone",
-          "private_car_plate", "emergency_contact", "emergency_phone",
-          "marital", "children", "spouse_complete_name", "spouse_birthdate", "km_home_work",
-          "study_field", "study_school", "certificate", "additional_note",
-          "wage", "contract_wage"
+          "identification_id",
+          "passport_id",
+          "ssnid",
+          "sinid",
+          "visa_no",
+          "permit_no",
+          "birthday",
+          "place_of_birth",
+          "country_of_birth",
+          "private_street",
+          "private_street2",
+          "private_city",
+          "private_zip",
+          "private_state_id",
+          "private_country_id",
+          "private_email",
+          "private_phone",
+          "private_car_plate",
+          "emergency_contact",
+          "emergency_phone",
+          "marital",
+          "children",
+          "spouse_complete_name",
+          "spouse_birthdate",
+          "km_home_work",
+          "study_field",
+          "study_school",
+          "certificate",
+          "additional_note",
+          "wage",
+          "contract_wage"
         ]
       },
       "hr.version": {
         "deny": [
-          "identification_id", "passport_id", "ssnid", "sinid", "visa_no", "permit_no",
-          "birthday", "place_of_birth", "country_of_birth",
-          "private_street", "private_street2", "private_city", "private_zip",
-          "private_state_id", "private_country_id", "private_email", "private_phone",
-          "private_car_plate", "emergency_contact", "emergency_phone",
-          "marital", "children", "spouse_complete_name", "spouse_birthdate", "km_home_work",
-          "study_field", "study_school", "certificate", "additional_note",
-          "wage", "contract_wage"
+          "identification_id",
+          "passport_id",
+          "ssnid",
+          "sinid",
+          "visa_no",
+          "permit_no",
+          "birthday",
+          "place_of_birth",
+          "country_of_birth",
+          "private_street",
+          "private_street2",
+          "private_city",
+          "private_zip",
+          "private_state_id",
+          "private_country_id",
+          "private_email",
+          "private_phone",
+          "private_car_plate",
+          "emergency_contact",
+          "emergency_phone",
+          "marital",
+          "children",
+          "spouse_complete_name",
+          "spouse_birthdate",
+          "km_home_work",
+          "study_field",
+          "study_school",
+          "certificate",
+          "additional_note",
+          "wage",
+          "contract_wage"
         ]
       },
       "res.partner": {
-        "deny": ["credit_limit", "comment", "debit", "credit", "total_due", "credit_to_invoice"]
+        "deny": [
+          "credit_limit",
+          "comment",
+          "debit",
+          "credit",
+          "total_due",
+          "credit_to_invoice"
+        ]
       },
       "res.partner.bank": {
-        "deny": ["acc_number", "sanitized_acc_number", "acc_holder_name"]
+        "deny": [
+          "acc_number",
+          "sanitized_acc_number",
+          "acc_holder_name"
+        ]
       },
       "sale.order": {
-        "deny": ["margin", "margin_percent"]
+        "deny": [
+          "margin",
+          "margin_percent"
+        ]
       },
       "sale.order.line": {
-        "deny": ["purchase_price", "margin", "margin_percent"]
+        "deny": [
+          "purchase_price",
+          "margin",
+          "margin_percent"
+        ]
       },
       "product.template": {
-        "deny": ["standard_price"]
+        "deny": [
+          "standard_price"
+        ]
       },
       "product.product": {
-        "deny": ["standard_price"]
+        "deny": [
+          "standard_price"
+        ]
       }
     }
   }
