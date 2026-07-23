@@ -22,6 +22,9 @@ def test_parse_args_defaults_to_stdio(monkeypatch):
 
 def test_cli_applies_streamable_http_runtime_settings(monkeypatch):
     cli = importlib.import_module("odoo_mcp.__main__")
+    # This test exercises runtime-settings application, not auth. HTTP transports
+    # now fail closed without auth, so declare the explicit local-dev opt-in.
+    monkeypatch.setenv("MCP_ALLOW_UNAUTHENTICATED_HTTP", "1")
     calls = []
 
     def fake_run(*, transport):
@@ -289,6 +292,8 @@ def test_main_masks_secret_environment_values_in_startup_log(monkeypatch, capsys
 def test_main_logs_streamable_http_bind_and_path(monkeypatch, capsys):
     cli = importlib.import_module("odoo_mcp.__main__")
 
+    # Logging test, not an auth test; opt in to ungated local HTTP explicitly.
+    monkeypatch.setenv("MCP_ALLOW_UNAUTHENTICATED_HTTP", "1")
     monkeypatch.setattr(cli.mcp, "run", lambda *, transport: None)
     monkeypatch.setattr(
         cli.sys,

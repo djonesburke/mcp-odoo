@@ -19,6 +19,7 @@ Env vars:
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import time
@@ -32,6 +33,16 @@ from pydantic import AnyHttpUrl
 logger = logging.getLogger(__name__)
 
 AUTH_ENV_PREFIX = "ODOO_MCP_AUTH_"
+
+# Static shared-bearer-token gate (separate from, and mutually exclusive with,
+# the OAuth introspection mode above). This is the auth model the claude.ai /
+# Cowork custom-connector UI uses: the connector platform sends ONE shared
+# static bearer token on every request ("Request headers" option). We validate
+# that header here with a constant-time compare — no external IdP required.
+STATIC_TOKEN_ENV = "MCP_HTTP_AUTH_TOKEN"
+STATIC_RESOURCE_ENV = "MCP_HTTP_AUTH_RESOURCE_URL"
+STATIC_DEFAULT_RESOURCE = "http://localhost/mcp"
+STATIC_CLIENT_ID = "static-header-connector"
 
 
 def _env(name: str) -> str | None:
@@ -165,4 +176,126 @@ def build_auth() -> tuple[AuthSettings, IntrospectionTokenVerifier] | None:
         client_id=_env("CLIENT_ID"),
         client_secret=_env("CLIENT_SECRET"),
     )
+    return settings, verifier
+
+
+def oauth_env_present() -> bool:
+    """True when ANY ODOO_MCP_AUTH_* var is set (complete OR partial).
+
+    Used to detect a config that mixes OAuth with the static-header mode, so we
+    can refuse the ambiguous combination rather than silently pick one.
+    """
+    return any(
+        os.environ.get(key, "").strip()
+        for key in os.environ
+        if key.startswith(AUTH_ENV_PREFIX)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Static shared-bearer-token gate
+# ---------------------------------------------------------------------------
+
+
+def static_tokens() -> list[str]:
+    """Parse the configured static bearer token(s).
+
+    ``MCP_HTTP_AUTH_TOKEN`` accepts a single token or a comma-separated list, so
+    distinct connectors can be issued distinct tokens against one endpoint while
+    the deployment topology keeps one process per role. Blanks are ignored;
+    order-preserving de-duplication keeps the compare loop tight.
+    """
+    raw = os.environ.get(STATIC_TOKEN_ENV, "")
+    seen: set[str] = set()
+    tokens: list[str] = []
+    for candidate in raw.split(","):
+        token = candidate.strip()
+        if token and token not in seen:
+            seen.add(token)
+            tokens.append(token)
+    return tokens
+
+
+def static_auth_configured() -> bool:
+    """True when at least one non-empty static bearer token is configured."""
+    return bool(static_tokens())
+
+
+def static_resource_url() -> str:
+    """Canonical resource URL advertised in RS metadata for the static gate."""
+    return os.environ.get(STATIC_RESOURCE_ENV, "").strip() or STATIC_DEFAULT_RESOURCE
+
+
+def static_auth_posture() -> dict[str, Any]:
+    """Non-secret static-auth posture for health_check / security report.
+
+    Never includes the token(s) themselves — only whether the gate is on and
+    how many distinct tokens are accepted.
+    """
+    return {
+        "enabled": static_auth_configured(),
+        "token_count": len(static_tokens()),
+        "resource_url": static_resource_url(),
+    }
+
+
+class StaticTokenVerifier(TokenVerifier):
+    """Validate a shared bearer token against a fixed allowlist.
+
+    Plugs into the exact same FastMCP seam as the OAuth verifier
+    (``mcp._token_verifier`` + ``mcp.settings.auth``): FastMCP's
+    ``BearerAuthBackend`` extracts the ``Authorization: Bearer`` header and
+    calls :meth:`verify_token`; a ``None`` return makes ``RequireAuthMiddleware``
+    answer 401. A missing/non-bearer header never reaches here — the backend
+    returns 401 on its own. No token is ever expired here (rotation is an
+    operational concern); an empty allowlist accepts nothing.
+    """
+
+    def __init__(self, tokens: list[str], *, resource_url: str) -> None:
+        # Pre-encode to bytes so verify_token does no per-call work beyond the
+        # constant-time compare itself.
+        self._expected = [token.encode("utf-8") for token in tokens]
+        self.resource_url = resource_url
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        presented = token.encode("utf-8")
+        # Compare against EVERY configured token without short-circuiting, so
+        # the number of comparisons does not depend on which token matched
+        # (or on whether an early entry matched). hmac.compare_digest is the
+        # constant-time primitive; a plain ``==`` would leak length/prefix.
+        matched = False
+        for expected in self._expected:
+            if hmac.compare_digest(presented, expected):
+                matched = True
+        if not matched:
+            return None
+        return AccessToken(
+            token=token,
+            client_id=STATIC_CLIENT_ID,
+            scopes=[],
+            expires_at=None,
+            resource=self.resource_url,
+        )
+
+
+def build_static_auth() -> tuple[AuthSettings, StaticTokenVerifier] | None:
+    """Build (AuthSettings, verifier) for the static gate, or None when off.
+
+    ``AuthSettings`` requires an issuer and a resource URL for the SDK to install
+    the bearer-auth middleware and emit RFC 9728 metadata. The static gate has
+    no authorization server, so issuer is set to the resource URL — cosmetic
+    only; static-header connectors send the header and never run OAuth
+    discovery. ``required_scopes`` is None: possession of a valid token is the
+    sole requirement.
+    """
+    tokens = static_tokens()
+    if not tokens:
+        return None
+    resource = static_resource_url()
+    settings = AuthSettings(
+        issuer_url=AnyHttpUrl(resource),
+        resource_server_url=AnyHttpUrl(resource),
+        required_scopes=None,
+    )
+    verifier = StaticTokenVerifier(tokens, resource_url=resource)
     return settings, verifier

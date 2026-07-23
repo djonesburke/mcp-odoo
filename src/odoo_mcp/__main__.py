@@ -11,10 +11,13 @@ import sys
 import time
 import traceback
 
-from .auth import build_auth
+from . import auth as auth_mod
+from .auth import build_auth, build_static_auth
 from .server import mcp
 
 SUPPORTED_MCP_TRANSPORTS = {"stdio", "streamable-http", "sse"}
+HTTP_TRANSPORTS = {"streamable-http", "sse"}
+ALLOW_UNAUTH_HTTP_ENV = "MCP_ALLOW_UNAUTHENTICATED_HTTP"
 SECRET_ENV_KEYS = {"ODOO_PASSWORD", "ODOO_API_KEY", "MCP_HTTP_AUTH_TOKEN"}
 LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost", "::1"}
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -239,7 +242,91 @@ def configure_mcp_runtime(args: argparse.Namespace) -> None:
             security.allowed_hosts = allowed_hosts
         if allowed_origins:
             security.allowed_origins = allowed_origins
-    configure_oauth(args)
+    configure_http_auth(args)
+
+
+def configure_http_auth(args: argparse.Namespace) -> None:
+    """Select and wire the HTTP auth mode, and fail closed when it is absent.
+
+    Two mutually exclusive modes protect HTTP transports:
+      * OAuth introspection  — ODOO_MCP_AUTH_* (external IdP)
+      * Static shared bearer — MCP_HTTP_AUTH_TOKEN (connector-platform model)
+
+    Configuring both is rejected: the intent is ambiguous and one would silently
+    win. When neither is configured on an HTTP transport the server refuses to
+    start, so an ungated HTTP endpoint cannot happen by omission. The refusal
+    covers *all* HTTP binds — including 127.0.0.1 — because the production
+    topology fronts a localhost bind with a Cloudflare tunnel, so "bound to
+    localhost" is not evidence the endpoint is private. A deliberate,
+    named escape hatch (MCP_ALLOW_UNAUTHENTICATED_HTTP=1) exists for genuinely
+    local, no-tunnel development; it is loud and never the default.
+    """
+    static_on = auth_mod.static_auth_configured()
+    oauth_on = auth_mod.oauth_env_present()
+
+    if static_on and oauth_on:
+        raise ValueError(
+            "Configure only ONE HTTP auth mode: MCP_HTTP_AUTH_TOKEN (static "
+            "shared bearer) OR ODOO_MCP_AUTH_* (OAuth introspection), not both."
+        )
+
+    if static_on:
+        configure_static_auth(args)
+    else:
+        # build_auth() (inside configure_oauth) still raises on a partial
+        # ODOO_MCP_AUTH_* config, preserving that fail-closed behavior.
+        configure_oauth(args)
+
+    if args.transport not in HTTP_TRANSPORTS:
+        return
+    if static_on or oauth_on:
+        return
+    # HTTP transport with no auth configured.
+    if parse_bool(os.environ.get(ALLOW_UNAUTH_HTTP_ENV)):
+        print(
+            "WARNING: HTTP transport is running with NO authentication "
+            f"({ALLOW_UNAUTH_HTTP_ENV} is set). Every request that reaches this "
+            "endpoint can call every tool. Use this only for local development "
+            "with no network exposure.",
+            file=sys.stderr,
+        )
+        return
+    if getattr(args, "health", False):
+        # A health probe never serves traffic; do not block introspection.
+        return
+    raise ValueError(
+        "Refusing to start an HTTP transport with no authentication. Set "
+        "MCP_HTTP_AUTH_TOKEN (static shared bearer) or the ODOO_MCP_AUTH_* "
+        "OAuth vars. For local development only, set "
+        f"{ALLOW_UNAUTH_HTTP_ENV}=1 to run ungated deliberately."
+    )
+
+
+def configure_static_auth(args: argparse.Namespace) -> None:
+    """Enable the static shared-bearer gate when MCP_HTTP_AUTH_TOKEN is set.
+
+    Wired through the same FastMCP seam as OAuth (settings.auth +
+    _token_verifier). Ignored with a warning on stdio, matching configure_oauth.
+    """
+    built = build_static_auth()
+    if built is None:
+        return
+    if args.transport not in HTTP_TRANSPORTS:
+        print(
+            "MCP_HTTP_AUTH_TOKEN is set but the transport is stdio; "
+            "the static header gate only protects HTTP transports and will be "
+            "ignored.",
+            file=sys.stderr,
+        )
+        return
+    auth_settings, verifier = built
+    mcp.settings.auth = auth_settings
+    mcp._token_verifier = verifier
+    token_count = len(auth_mod.static_tokens())
+    print(
+        f"Static header auth enabled ({token_count} token(s) accepted).",
+        file=sys.stderr,
+    )
 
 
 def configure_oauth(args: argparse.Namespace) -> None:
