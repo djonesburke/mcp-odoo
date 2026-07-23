@@ -37,6 +37,7 @@ from .write_policy import (
 )
 from .audit import audit_posture
 from .auth import auth_posture as oauth_posture
+from .auth import static_auth_posture
 from .field_policy import field_policy_posture, get_field_policy
 
 
@@ -425,6 +426,7 @@ def runtime_security_report() -> Dict[str, Any]:
         "odoo_instances": instance_posture(),
         "audit_log": audit_posture(),
         "oauth": oauth_posture(),
+        "static_http_auth": static_auth_posture(),
         "field_acl": field_policy_posture(),
         "n_plus_one": n_plus_one_report(),
         "notes": [
