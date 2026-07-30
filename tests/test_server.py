@@ -1476,6 +1476,7 @@ class _ChatterClient:
 def test_chatter_post_default_returns_preview_without_executing(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     result = server.chatter_post(
@@ -1494,6 +1495,7 @@ def test_chatter_post_default_returns_preview_without_executing(monkeypatch):
 def test_chatter_post_execute_with_valid_approval_posts(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1519,6 +1521,7 @@ def test_chatter_post_execute_with_valid_approval_posts(monkeypatch):
 def test_chatter_post_rejects_token_mismatch(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1540,6 +1543,7 @@ def test_chatter_post_rejects_token_mismatch(monkeypatch):
 def test_chatter_post_requires_confirm_in_gated_mode(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1561,6 +1565,7 @@ def test_chatter_post_requires_confirm_in_gated_mode(monkeypatch):
 def test_chatter_post_direct_mode_posts_immediately(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setenv("MCP_CHATTER_DIRECT", "1")
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient(post_result=999)
 
     result = server.chatter_post(
@@ -1580,6 +1585,7 @@ def test_chatter_post_direct_mode_posts_immediately(monkeypatch):
 def test_chatter_post_validates_inputs(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     empty = server.chatter_post(
@@ -1804,6 +1810,7 @@ def test_aggregate_records_accepts_domain_json_string():
 def test_chatter_post_rejects_negative_record_id(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     result = server.chatter_post(
@@ -1817,6 +1824,7 @@ def test_chatter_post_rejects_negative_record_id(monkeypatch):
 def test_chatter_post_rejects_invalid_model_name(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     result = server.chatter_post(
@@ -1829,6 +1837,7 @@ def test_chatter_post_rejects_invalid_model_name(monkeypatch):
 def test_chatter_post_passes_optional_kwargs_through(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setenv("MCP_CHATTER_DIRECT", "1")
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient(post_result=42)
 
     result = server.chatter_post(
@@ -1851,6 +1860,7 @@ def test_chatter_post_passes_optional_kwargs_through(monkeypatch):
 def test_chatter_post_token_is_deterministic_for_same_payload(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1862,6 +1872,7 @@ def test_chatter_post_token_is_deterministic_for_same_payload(monkeypatch):
 def test_chatter_post_propagates_execute_method_failure(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setenv("MCP_CHATTER_DIRECT", "1")
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
 
     class BoomClient:
         def execute_method(self, *args, **kwargs):
@@ -1961,6 +1972,7 @@ def test_aggregate_records_response_shape_is_stable():
 def test_chatter_post_preview_response_shape_is_stable(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
 
     response = server.chatter_post(
         FakeCtx(_ChatterClient()),
@@ -3258,6 +3270,7 @@ def test_aggregate_records_passes_offset_and_order_in_formatted_path():
 def test_chatter_post_returns_error_for_empty_body_validation_message(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     result = server.chatter_post(
         FakeCtx(_ChatterClient()),
         model="res.partner",
@@ -3837,6 +3850,7 @@ def test_chatter_post_tokens_differ_between_instances(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     default_client = _NamedClient("default")
     globex_client = _NamedClient("globex")
     ctx = FakeCtx(default_client, clients={"globex": globex_client})
