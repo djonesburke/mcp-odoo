@@ -541,8 +541,21 @@ def chatter_post(
       call without a token.
 
     Allowed ``message_type`` values: ``comment`` (default), ``notification``.
+
+    Both modes require ``ODOO_MCP_ENABLE_WRITES=1``: posting to the chatter is a
+    write, and on a ``comment`` it notifies followers by email.
     """
     try:
+        # Checked at entry, ahead of both the preview/token branch and the
+        # MCP_CHATTER_DIRECT branch, so a server that cannot execute the post
+        # never hands out an approval token it would later refuse to honour.
+        if not writes_enabled():
+            return {
+                "success": False,
+                "tool": "chatter_post",
+                "error": "write execution disabled; set ODOO_MCP_ENABLE_WRITES=1 to enable",
+            }
+
         instance_name, odoo = _resolve_odoo(ctx, instance)
         validate_model_name(model)
         if record_id < 1:
