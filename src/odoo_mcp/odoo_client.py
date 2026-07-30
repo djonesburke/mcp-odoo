@@ -152,12 +152,15 @@ class OdooClient:
             timeout=self.timeout, use_https=is_https, verify_ssl=self.verify_ssl
         )
 
-        # Set up XML-RPC endpoints.
+        # Set up XML-RPC endpoints. allow_none=True is required so the client can
+        # marshal None (Odoo's XML-RPC server already emits <nil/>); without it a
+        # write payload or fields_get metadata containing None raises
+        # "cannot marshal None unless allow_none is enabled".
         self._common = xmlrpc.client.ServerProxy(
-            f"{self.url}/xmlrpc/2/common", transport=transport
+            f"{self.url}/xmlrpc/2/common", transport=transport, allow_none=True
         )
         self._models = xmlrpc.client.ServerProxy(
-            f"{self.url}/xmlrpc/2/object", transport=transport
+            f"{self.url}/xmlrpc/2/object", transport=transport, allow_none=True
         )
 
         # Authenticate and capture the user ID.
@@ -530,6 +533,23 @@ class OdooClient:
             print(f"Error retrieving model info: {str(e)}", file=sys.stderr)
             return {"error": str(e)}
 
+    # fields_get attributes requested by get_model_fields. Bounded on purpose: Odoo 19's XML-RPC
+    # layer fails server-side ("cannot marshal None") on models whose full fields_get contains a
+    # None-valued attribute (e.g. `domain` on product.pricelist), which broke validate_write for
+    # those models. This list covers every attribute the server consumes; a missing attribute reads
+    # as None via .get(), exactly as before.
+    FIELDS_GET_ATTRIBUTES = [
+        "string",
+        "help",
+        "type",
+        "required",
+        "readonly",
+        "relation",
+        "selection",
+        "store",
+        "searchable",
+    ]
+
     def get_model_fields(self, model_name: str) -> dict[str, Any]:
         """
         Get field definitions for a specific model
@@ -547,7 +567,9 @@ class OdooClient:
             'char'
         """
         try:
-            fields = self._execute(model_name, "fields_get")
+            fields = self._execute(
+                model_name, "fields_get", attributes=self.FIELDS_GET_ATTRIBUTES
+            )
             return cast(dict[str, Any], fields)
         except Exception as e:
             print(f"Error retrieving fields: {str(e)}", file=sys.stderr)

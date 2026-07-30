@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from odoo_mcp import agent_tools
+from odoo_mcp import field_ranking
 
 
 def _meta(field_type: str = "char", **extra) -> dict:
@@ -250,6 +251,72 @@ def test_verify_write_approval_returns_true_for_matching_token():
     }
     token = agent_tools.build_approval_token(canonical)
     is_valid, _ = agent_tools.verify_write_approval({**canonical, "token": token})
+    assert is_valid is True
+
+
+# ----- canonical_json / build_approval_token int/float stability -----------
+
+
+def test_canonical_json_treats_integral_float_same_as_int():
+    assert agent_tools.canonical_json({"unit_amount": 1.0}) == agent_tools.canonical_json(
+        {"unit_amount": 1}
+    )
+
+
+def test_canonical_json_normalizes_integral_floats_in_nested_structures():
+    payload = {"values_list": [{"amount": 2.0, "ids": [3.0, 4]}], "record_ids": [5.0]}
+    assert agent_tools.canonical_json(payload) == agent_tools.canonical_json(
+        {"values_list": [{"amount": 2, "ids": [3, 4]}], "record_ids": [5]}
+    )
+
+
+def test_canonical_json_preserves_non_integral_floats():
+    assert agent_tools.canonical_json({"unit_amount": 1.0167}) != agent_tools.canonical_json(
+        {"unit_amount": 1}
+    )
+
+
+def test_canonical_json_does_not_coerce_booleans_to_numbers():
+    assert agent_tools.canonical_json({"active": True}) != agent_tools.canonical_json(
+        {"active": 1}
+    )
+
+
+def test_build_approval_token_matches_across_int_and_float_representation():
+    token_with_float = agent_tools.build_approval_token({"unit_amount": 1.0})
+    token_with_int = agent_tools.build_approval_token({"unit_amount": 1})
+    assert token_with_float == token_with_int
+
+
+def test_verify_write_approval_accepts_token_built_with_integral_float():
+    canonical = {
+        "model": "account.analytic.line",
+        "operation": "create",
+        "record_ids": [],
+        "values": {"unit_amount": 1.0},
+        "context": {},
+        "instance": "default",
+    }
+    # Simulate preview_write hashing a float that arrived as an int through
+    # a re-verification pass (e.g. a JSON transport that dropped the ".0").
+    token = agent_tools.build_approval_token(canonical)
+    reverified = {**canonical, "values": {"unit_amount": 1}, "token": token}
+    is_valid, _ = agent_tools.verify_write_approval(reverified)
+    assert is_valid is True
+
+
+def test_verify_write_approval_accepts_token_built_with_int_reverified_as_float():
+    canonical = {
+        "model": "account.analytic.line",
+        "operation": "create",
+        "record_ids": [],
+        "values": {"unit_amount": 1},
+        "context": {},
+        "instance": "default",
+    }
+    token = agent_tools.build_approval_token(canonical)
+    reverified = {**canonical, "values": {"unit_amount": 1.0}, "token": token}
+    is_valid, _ = agent_tools.verify_write_approval(reverified)
     assert is_valid is True
 
 
@@ -760,6 +827,13 @@ def test_lookup_model_history_resolves_old_name_to_new_model():
     assert report["matches"][0]["new_model"] == "account.move"
     assert any("account.move" in line for line in report["guidance"])
 
+def test_lookup_model_history_resolves_newly_added_model():
+    report = agent_tools.lookup_model_history_report("payment.icon")
+    assert report["success"] is True
+    assert report["match_type"] == "exact"
+    assert report["matches"][0]["new_model"] == "payment.method"
+    assert any("payment.method" in line for line in report["guidance"])
+
 
 def test_lookup_model_history_recognizes_current_name():
     report = agent_tools.lookup_model_history_report("discuss.channel")
@@ -783,6 +857,12 @@ def test_lookup_model_history_partial_and_no_match():
     assert missing["match_type"] == "none"
     assert missing["matches"] == []
     assert any("list_models" in line for line in missing["guidance"])
+
+    typo = agent_tools.lookup_model_history_report("account.invoicee")
+    assert typo["match_type"] == "none"
+    assert typo["matches"] == []
+    assert "account.invoice" in typo["suggestions"]
+    assert any("Did you mean: " in line for line in typo["guidance"])
 
 
 def test_lookup_model_history_rejects_empty_name():
@@ -836,13 +916,13 @@ def test_rank_relevant_fields_respects_max_fields_cap():
 
 def test_smart_field_score_falls_through_to_default_for_unknown_types():
     # Field type not matching any priority branch returns 10
-    score = agent_tools._smart_field_score("custom_thing", {"type": "reference"})
+    score = field_ranking._smart_field_score("custom_thing", {"type": "reference"})
     assert score == 10
 
 
 def test_smart_field_score_assigns_low_score_to_one2many_many2many_relations():
-    assert agent_tools._smart_field_score("members", {"type": "one2many"}) == 5
-    assert agent_tools._smart_field_score("tags", {"type": "many2many"}) == 5
+    assert field_ranking._smart_field_score("members", {"type": "one2many"}) == 5
+    assert field_ranking._smart_field_score("tags", {"type": "many2many"}) == 5
 
 
 # ----- _scan_python_file path / scan_addons_source path coverage --------

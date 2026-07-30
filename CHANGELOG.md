@@ -2,6 +2,184 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1] - 2026-07-14
+
+Community patch: the write-approval gate no longer drops valid tokens on
+int/float transport drift, the 10 highest-traffic tools describe their
+parameters to MCP clients, and the suite is hermetic on developer machines
+that carry a real Odoo config. All three code changes came from community
+PRs. 909 tests.
+
+### Added
+- **Per-parameter input descriptions (first 10 tools)** — the highest-traffic
+  tools (`search_records`, `read_record`, `execute_method`, the gated-write
+  trio, accounting/diagnostics/cross-instance entry points) now wrap every
+  non-context parameter in `Annotated[..., Field(description=...)]`, so MCP
+  clients and inspectors render real `inputSchema` property descriptions.
+  Coverage is pinned by `DESCRIBED_INPUT_TOOLS` in `tests/test_schemas.py`;
+  remaining tool groups tracked in #35. (#41)
+
+### Changed
+- Field ranking / smart field selection helpers moved from `agent_tools.py`
+  into a dedicated `field_ranking.py` core module (compatibility re-exports
+  kept, import-linter contract updated). No behavior change. (#42)
+
+### Fixed
+- **Write-approval token instability across int/float JSON transports** —
+  `canonical_json` (`agent_tools.py`) now normalizes integral floats (`1.0`)
+  to `int` (`1`) before hashing, recursively across dicts/lists. Previously,
+  a numeric value that round-tripped through a JSON transport layer where
+  `1` and `1.0` are the same value (common in JS/TS clients and gateways)
+  could change the SHA-256 approval token between `preview_write`/
+  `validate_write` and `execute_approved_write`, causing intermittent
+  `"approval token does not match the canonical payload"` failures on
+  otherwise-valid, unchanged payloads — most visible with "round" numeric
+  field values (e.g. `unit_amount: 1.0` on `account.analytic.line`).
+  Booleans are left untouched. No change to already-issued tokens for
+  payloads that only ever contained plain ints. (#48)
+
+## [1.2.0] - 2026-07-14
+
+Field-ops release: context-safe attachment uploads, an Agent Skills pack,
+typo-tolerant model-history lookups, and kinder failure modes around Odoo's
+XML-RPC `None`-marshalling quirks — hardened by a real production
+misattributed-freight correction run end-to-end through the write gate.
+901 tests.
+
+### Added
+- **Local-file attachment uploads** — `validate_write` accepts `<field>_from_path`
+  (e.g. `datas_from_path`) as an alternative to inlining base64 for binary
+  fields such as `ir.attachment.datas`. The server reads the file, and the
+  approval only ever carries a `sha256:<hex>:<size>` fingerprint for that
+  field — the real bytes never appear in a tool response, in the stored
+  approval token payload, or in anything the caller echoes back to
+  `execute_approved_write`, which substitutes the real content server-side at
+  execution time. Fixes the case where a large attachment (a resume, an
+  invoice PDF, ...) can't be inlined into a single tool call without blowing
+  past an agent's context budget. Fails closed: requires
+  `ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS` (colon-separated allowed local
+  directories, mirrors `ODOO_ADDONS_PATHS`) and enforces
+  `ODOO_MCP_MAX_ATTACHMENT_UPLOAD_BYTES` (default 10 MiB, hard cap 16 MiB).
+  No new tool — routes through the existing `preview_write` → `validate_write`
+  → `execute_approved_write` gate, same live-metadata and confirm requirements
+  as every other write.
+- **Agent Skills pack** — `skills/` ships 4 business-workflow skills in the
+  open Agent Skills format (`odoo-data-quality-gate`,
+  `odoo-migration-copilot`, `odoo-month-end-close`,
+  `odoo-agency-fleet-review`): judgment playbooks (evidence rules, pacing,
+  human checkpoints) on top of the MCP tool layer, for Claude Code and other
+  skills-compatible agents. Install by copying into `~/.claude/skills/`.
+- **Model-history lookups suggest close names** — `lookup_model_history` now
+  offers nearest-match suggestions when a model name misses, and the
+  cross-version rename map covers additional Odoo model renames.
+
+### Fixed
+- `get_model_fields` now requests a bounded, marshal-safe `attributes` list
+  instead of a full `fields_get`. On Odoo 19, a full `fields_get` faults
+  **server-side** for models whose `domain` attribute is `None` (e.g.
+  `product.pricelist`) — Odoo's own XML-RPC layer refuses to marshal its
+  response, which no client flag can fix (complements the client-side
+  `allow_none` fix shipped in 1.1.0). The bounded list covers every attribute
+  the server consumes (`string`, `help`, `type`, `required`, `readonly`,
+  `relation`, `selection`, `store`, `searchable`); an absent attribute reads
+  as `None` via `.get()`, exactly as before. Unblocks `validate_write` on such
+  models (e.g. creating an IQD `product.pricelist`).
+- `execute_method` no longer reports a **phantom failure** when a
+  side-effect method returns `None` (`button_draft`, `action_post`,
+  `account.move.line.reconcile`, ...). Odoo executes and commits the call,
+  then its XML-RPC layer faults while serializing the `None` return value
+  ("cannot marshal None unless allow_none is enabled") — the state change is
+  already persisted, so surfacing an error invites a dangerous retry. The
+  tool now returns `success: true, result: null` plus an explicit warning to
+  verify with a read.
+- The blocked-side-effect error on `execute_method` now points at the policy
+  file (`ODOO_MCP_POLICY_FILE`, default `./odoo_mcp_policy.json`, re-read on
+  every request — no server restart) as the primary allowlist mechanism;
+  previously it only mentioned the env vars, and the better, reviewable path
+  was discoverable only by reading source.
+- The test suite is now hermetic on a developer machine that carries a real
+  Odoo config: an autouse fixture points `ODOO_CONFIG_FILE` at a missing file
+  so instance resolution behaves like a bare CI runner (previously a
+  `~/.config/odoo/config.json` flipped resolution semantics and failed four
+  instance/knowledge tests locally while CI stayed green).
+
+## [1.1.0] - 2026-07-02
+
+Community-roadmap release: the server becomes a platform (plugins), the
+migration wave gets real tooling (data quality + upgrade-log analysis), and
+the MCP surface gets typed. Tool count 39 → 41; prompts 10 → 11; 885 tests.
+
+### Added
+- **Tool plugins** — third parties can ship odoo-mcp tools as normal pip
+  packages exposing an `odoo_mcp.tools` entry point with a `register(api)`
+  callable; `odoo_mcp.plugin_api` (v1) provides the stable surface (tool
+  decorator, instance resolution, field-ACL redaction, envelopes).
+  **Opt-in only**: nothing loads unless the name is listed in
+  `ODOO_MCP_PLUGINS`; a raising plugin is isolated and reported under
+  `health_check.plugins`. Runnable example in `examples/plugin-example/`;
+  authoring guide + threat model in [docs/plugins.md](docs/plugins.md).
+- **Per-deployment tool filtering** — `ODOO_MCP_TOOLS_INCLUDE` /
+  `ODOO_MCP_TOOLS_EXCLUDE` (CSV fnmatch globs) trim the registered tool
+  surface for token-constrained clients; removed names surface in
+  `health_check.plugins.tools_filtered`.
+- **Data-quality pack (read-only)** — new tool `data_quality_report` runs
+  evidence-first checks on one model: `duplicates` (server-side read_group on
+  identifier fields), `missing_required`, `orphaned_references` (honest about
+  ACL-hidden targets), `format_anomalies` (email/phone/vat heuristics). Field
+  ACL is the ceiling (denied fields skipped + listed); every issue carries
+  record ids/values; remediation stays behind the gated write workflow.
+  Registered on the async allowlist for large models. New core module
+  `data_quality.py` + surface `tools_data_quality.py`; docs in
+  [docs/data-quality.md](docs/data-quality.md). Tool count 39 → 41.
+- **Migration workbench v1** — new tool `analyze_upgrade_log` classifies Odoo
+  install/update log failures (xpath breaks, missing fields/models/external
+  ids, NOT NULL violations, dependency errors, Odoo 17 attrs removal, ORM
+  signature changes) into an OpenUpgrade-style worklist with per-finding
+  suggestions; input-driven, never contacts Odoo. `scan_addons_source`
+  findings and `upgrade_risk_report` risks now carry the same `action`
+  taxonomy (`no_action` / `needs_review` / `needs_script`) plus an `actions`
+  summary.
+- **Workflow prompt #11** — `pre_migration_data_quality` chains the
+  data-quality pack, `diagnose_access` confirmation, and `analyze_upgrade_log`
+  into a migration gate with human-approved, write-gated remediation batches
+  (prompt count 10 → 11).
+- **Typed per-tool output schemas (read surface)** — the 10 dict-returning
+  read tools (`get_odoo_profile`, `schema_catalog`, `health_check`,
+  `list_instances`, `list_models`, `get_model_fields`, `search_records`,
+  `read_record`, `read_attachment`, `aggregate_records`) now declare Pydantic
+  response models (new core module `schemas.py`), so `tools/list` advertises
+  real `outputSchema` fields instead of a generic object wrapper. Runtime
+  behavior is unchanged (same envelope, extra keys allowed); MCP responses now
+  include explicit `null`s for unset optional fields. Remaining tool groups
+  are tracked as `good first issue`s.
+- **OAuth hardening (SEP alignment)** — introspection responses carrying an
+  `iss` must match the configured issuer (mix-up attack defense);
+  `ODOO_MCP_AUTH_REQUIRE_ISS=1` rejects responses without `iss`;
+  `ODOO_MCP_AUTH_REQUIRE_AUD=1` rejects tokens without an `aud` claim;
+  introspection verdicts (including rejections) are cached for
+  `ODOO_MCP_AUTH_CACHE_TTL` seconds (default 60, `0` disables) so hot agent
+  loops no longer hammer the authorization server. `health_check` auth
+  posture reports the new flags.
+- **Server-level instructions** — `ODOO_MCP_INSTRUCTIONS_FILE` appends a
+  deployment-specific plain-text briefing to the MCP `instructions` field
+  every client receives (idea: #19, thanks @oadiazp). Unreadable path fails
+  at startup; content capped at 16k chars.
+
+### Changed
+- The deprecated SSE transport now prints a startup warning suggesting
+  `streamable-http`.
+- python-sdk 2.0 (MCP spec 2026-07-28) migration spiked against `mcp==2.0.0b1`
+  and mapped (FastMCP→MCPServer rename, `run()` kwargs, ctor-level
+  `token_verifier`, reshaped elicitation); the dependency pin stays
+  `mcp>=1.27,<2` until the port ships as its own release.
+
+### Fixed
+- XML-RPC transport: create the `ServerProxy` clients with `allow_none=True` so a
+  call whose payload or `fields_get` metadata contains `None` no longer raises
+  `TypeError: cannot marshal None unless allow_none is enabled` (seen when creating
+  a `product.pricelist` through `validate_write`). Odoo's XML-RPC server already
+  emits `<nil/>`, so the client must accept it too.
+
 ## [1.0.0] - 2026-06-11
 
 The v1.0 milestone: four roadmap phases close the highest-value gaps no

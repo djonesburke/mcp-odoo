@@ -3,7 +3,8 @@
 <!-- mcp-name: io.github.tuanle96/mcp-odoo -->
 
 <p align="center">
-  <strong>The Odoo MCP that is fluent in every Odoo version.</strong><br>
+  <strong>The free AI layer for Odoo — any edition, any version.</strong><br>
+  Odoo's built-in AI is Enterprise-only. Odoo MCP gives Community and Enterprise 16+ the same power for $0 with the LLM you already use (Claude, GPT, Gemini, DeepSeek, Ollama).<br>
   Five-minute install. Zero Odoo-side setup. Safe writes, real diagnostics, JSON-2 ready years before the Odoo 22 XML-RPC removal.
 </p>
 
@@ -15,6 +16,13 @@
   <a href="https://github.com/tuanle96/mcp-odoo/actions/workflows/publish.yml"><img alt="CI" src="https://github.com/tuanle96/mcp-odoo/actions/workflows/publish.yml/badge.svg"></a>
   <a href="https://github.com/tuanle96/mcp-odoo/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/tuanle96/mcp-odoo?style=flat"></a>
   <a href="https://github.com/tuanle96/mcp-odoo/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/tuanle96/mcp-odoo?style=flat"></a>
+  <a href="https://skills.sh/tuanle96/mcp-odoo"><img alt="Agent Skills" src="https://skills.sh/b/tuanle96/mcp-odoo"></a>
+</p>
+
+<p align="center">
+  <a href="https://tuanle96.github.io/mcp-odoo/cloud.html"><strong>☁️ Odoo MCP Cloud</strong> — hosted for agencies, private beta waitlist</a>
+  &nbsp;·&nbsp;
+  <a href="https://tuanle96.github.io/mcp-odoo/services.html"><strong>🔍 Fixed-price audits</strong> — data quality &amp; migration pre-flight</a>
 </p>
 
 Odoo MCP turns any Odoo 16+ database into a Model Context Protocol server — using only your existing credentials. **No App Store module, no permission setup, no admin access required.** Built for local agents, IDEs, and automation tools that need real Odoo context without hand-rolled scripts or unsafe direct write access.
@@ -35,13 +43,15 @@ Once configured (see [Setup](#setup)), ask your agent things like:
 
 | Capability | What it gives you |
 | --- | --- |
-| 39 MCP tools | Read records and attachments, aggregate server-side, post chatter, inspect schema, build domains, scan addons, diagnose calls, access rules, resolve model renames, validate writes, and fan out across instances. |
+| 41 MCP tools | Read records and attachments, aggregate server-side, post chatter, inspect schema, build domains, scan addons, diagnose calls and upgrade logs, check data quality, access rules, resolve model renames, validate writes, and fan out across instances. |
 | Field-level ACL | Opt-in per-instance, per-model field allow/deny enforced on every read path (records, aggregates, knowledge index, resources). First open-source Odoo MCP with it. See [docs/field-acl.md](docs/field-acl.md). |
 | Cross-instance queries | Read-only fan-out across many client DBs with merged, attributed, partial-failure-tolerant results — no warehouse, no sync. See [docs/partner-playbook.md](docs/partner-playbook.md). |
-| Workflow prompts | 10 prompts including 5 end-to-end business workflows (invoice approval, PO match, onboarding, expense review, month-end close) that route writes through the gate. |
+| Workflow prompts | 11 prompts including 6 end-to-end business workflows (invoice approval, PO match, onboarding, expense review, month-end close, pre-migration data quality) that route writes through the gate. |
 | Background tasks | `submit_async_task` runs long read operations (addon scans, knowledge indexing, AR/AP aging) on a bounded worker pool; poll with `get_async_task` while the agent keeps reasoning. |
 | Local-first knowledge search | `index_knowledge` + `search_knowledge` give BM25 relevance ranking over a bounded record slice — accent-insensitive, in-process, no embeddings service, no data leaving the machine. |
 | Accounting pack | `receivable_payable_aging` and `accounting_health_summary` answer the most common finance questions in one call instead of hand-built domains. |
+| Agent Skills pack | 4 business-workflow skills (data-quality gate, migration copilot, month-end close, agency fleet review) — `npx skills add tuanle96/mcp-odoo`. Developing on Odoo with shell access? Add the 21-skill companion dev suite [odoo-ai-skills](https://github.com/tuanle96/odoo-ai-skills). See [skills/](./skills/). |
+| Tool plugins | Ship your own tools as pip packages (`odoo_mcp.tools` entry points) — opt-in via `ODOO_MCP_PLUGINS`, fail-isolated, no fork needed. Trim the surface per deployment with `ODOO_MCP_TOOLS_INCLUDE/EXCLUDE`. See [docs/plugins.md](docs/plugins.md). |
 | Rate limiting | Opt-in sliding-window budget per instance and tool (`ODOO_MCP_RATE_LIMIT_MODE=warn\|block`), surfaced in `health_check`. |
 | Multi-instance | One server, several named Odoo instances — optional `instance` parameter on every tool, `list_instances` discovery, instance-bound approval tokens, per-instance schema caches. |
 | 5 agent prompts | Reusable workflows for failed calls, fit/gap workshops, JSON-2 migration, safe writes, and module audits. |
@@ -235,11 +245,19 @@ Optional environment variables:
 | `MCP_ALLOW_REMOTE_HTTP` | `0` | Truthy → permit non-local HTTP binds (still requires external auth/TLS). |
 | `MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` | local | CSV allowlists for HTTP transports. |
 | `ODOO_MCP_MAX_ATTACHMENT_BYTES` | `1048576` | Download cap for `read_attachment` content (hard cap 16 MiB). |
+| `ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS` | unset | Colon-separated local directories `validate_write` may read `<field>_from_path` uploads from (mirrors `ODOO_ADDONS_PATHS`). Required — fails closed with no roots configured. |
+| `ODOO_MCP_MAX_ATTACHMENT_UPLOAD_BYTES` | `10485760` | Size cap for `<field>_from_path` local-file uploads (hard cap 16 MiB). |
 | `ODOO_MCP_AUTH_ISSUER_URL` | unset | OAuth 2.1: authorization server issuer. With the two vars below, the HTTP transport becomes a protected resource server (RFC 9728 metadata + bearer validation). |
 | `ODOO_MCP_AUTH_INTROSPECTION_URL` | unset | RFC 7662 token introspection endpoint of the authorization server. |
 | `ODOO_MCP_AUTH_RESOURCE_URL` | unset | Canonical URL of this MCP server (RFC 8707 audience check when the AS binds tokens). |
 | `ODOO_MCP_AUTH_REQUIRED_SCOPES` | empty | CSV scopes required on every request. |
 | `ODOO_MCP_AUTH_CLIENT_ID` / `_CLIENT_SECRET` | unset | Credentials for the introspection call when the AS requires client auth. |
+| `ODOO_MCP_AUTH_REQUIRE_AUD` | `0` | Truthy → reject tokens whose introspection response has no `aud` claim (default only checks `aud` when present). |
+| `ODOO_MCP_AUTH_REQUIRE_ISS` | `0` | Truthy → reject introspection responses without an `iss` claim. A present `iss` must always match `ODOO_MCP_AUTH_ISSUER_URL` (mix-up attack hardening). |
+| `ODOO_MCP_AUTH_CACHE_TTL` | `60` | Seconds to cache introspection verdicts (`0` disables). Bounds both AS load and revocation lag. |
+| `ODOO_MCP_PLUGINS` | unset | CSV entry-point names to load as third-party tool plugins (group `odoo_mcp.tools`). Installation alone activates nothing; failures are isolated and reported in `health_check`. See [docs/plugins.md](docs/plugins.md). |
+| `ODOO_MCP_TOOLS_INCLUDE` / `_EXCLUDE` | unset | CSV fnmatch globs trimming the registered tool surface per deployment (small agents drown in 41 tools). Removed names listed in `health_check`. |
+| `ODOO_MCP_INSTRUCTIONS_FILE` | unset | Plain-text file appended to the server-level MCP `instructions` every client receives — deployment-specific guidance (fiscal-year rules, naming conventions) without touching tool descriptions. |
 
 You can also use `odoo_config.json`:
 
@@ -318,7 +336,7 @@ odoo-mcp --health
 
 ## MCP Tools
 
-39 tools grouped by use case. Each tool name is a single-purpose handle the agent can call. Tools that talk to Odoo accept an optional `instance` parameter when multiple instances are configured (see [Multiple Odoo instances](#multiple-odoo-instances)).
+41 tools grouped by use case. Each tool name is a single-purpose handle the agent can call. Tools that talk to Odoo accept an optional `instance` parameter when multiple instances are configured (see [Multiple Odoo instances](#multiple-odoo-instances)).
 
 ### Read & Discover (11)
 
@@ -422,7 +440,7 @@ One question across many configured instances, merged and attributed. See the [p
 
 ## Prompts
 
-10 prompts: 5 diagnostic, plus 5 operational **workflow** prompts that encode end-to-end business processes and route every write through the approval gate.
+11 prompts: 5 diagnostic, plus 6 operational **workflow** prompts that encode end-to-end business processes and route every write through the approval gate.
 
 | Prompt | Use it for |
 | --- | --- |
@@ -458,6 +476,17 @@ single atomic Odoo `create(vals_list)` call. Per-record differing `write`
 values are deliberately unsupported (they would need one non-atomic RPC per
 record). Optional extras: `ODOO_MCP_ELICIT_WRITES=1` adds a native
 human-confirmation form, `ODOO_MCP_AUDIT_LOG` records every write-path event.
+
+Large binary fields (a resume attached to `ir.attachment.datas`, a product
+image, ...) don't have to be inlined as base64 in the tool call — pass
+`<field>_from_path` instead (e.g. `datas_from_path: "/local/path/cv.pdf"`) to
+`validate_write`. The server reads the file itself; the approval only ever
+carries a `sha256:<hex>:<size>` fingerprint for that field, never the real
+content, so nothing large has to round-trip through the calling agent's
+context. Requires `ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS` (fails closed otherwise)
+and respects `ODOO_MCP_MAX_ATTACHMENT_UPLOAD_BYTES`. No new tool — this rides
+the same `preview_write` → `validate_write` → `execute_approved_write` gate as
+every other write.
 
 Reviewed side-effect methods such as `sale.order.action_confirm` can be enabled
 one by one:

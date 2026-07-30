@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import json
+import xmlrpc.client
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -109,7 +110,7 @@ def test_server_registers_expected_tools_and_resources_without_lifespan():
         "accounting_health_across_instances",
     }
     assert expected_tools <= tools
-    assert len(tools) == 39
+    assert len(tools) == 41
     assert "odoo://models" in resources
     assert {
         "odoo://model/{model_name}",
@@ -522,6 +523,57 @@ def test_execute_method_allows_exact_side_effect_allowlist(monkeypatch):
     assert calls == [(("sale.order", "action_confirm", [7]), {})]
     assert blocked["success"] is False
     assert "Unreviewed side-effect" in blocked["error"]
+    assert "odoo_mcp_policy.json" in blocked["error"]
+
+
+def test_execute_method_translates_none_marshal_fault(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+
+    class FakeClient:
+        def execute_method(self, *args, **kwargs):
+            raise xmlrpc.client.Fault(
+                1,
+                "Traceback (most recent call last): ... TypeError: cannot "
+                "marshal None unless allow_none is enabled",
+            )
+
+    monkeypatch.delenv("ODOO_MCP_ALLOW_UNKNOWN_METHODS", raising=False)
+    monkeypatch.setenv(
+        "ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", "account.move.button_draft"
+    )
+
+    result = server.execute_method(
+        FakeCtx(FakeClient()),
+        "account.move",
+        "button_draft",
+        args=[[394304]],
+    )
+
+    assert result["success"] is True
+    assert result["result"] is None
+    assert "committed" in result["warning"]
+
+
+def test_execute_method_surfaces_other_faults(monkeypatch):
+    server = importlib.import_module("odoo_mcp.server")
+
+    class FakeClient:
+        def execute_method(self, *args, **kwargs):
+            raise xmlrpc.client.Fault(1, "AccessError: operation not allowed")
+
+    monkeypatch.setenv(
+        "ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", "account.move.button_draft"
+    )
+
+    result = server.execute_method(
+        FakeCtx(FakeClient()),
+        "account.move",
+        "button_draft",
+        args=[[394304]],
+    )
+
+    assert result["success"] is False
+    assert "AccessError" in result["error"]
 
 
 def test_validate_write_only_registers_live_metadata_approvals(monkeypatch):
@@ -764,7 +816,7 @@ def test_profile_health_and_prompts_are_available():
 
     health = call_tool_json(server, "health_check", {})
     assert health["success"] is True
-    assert health["server"]["tool_count"] == 39
+    assert health["server"]["tool_count"] == 41
     assert health["runtime"]["chatter_direct_enabled"] is False
     assert health["runtime"]["broad_unknown_method_mode"]["enabled"] is False
 
@@ -1362,6 +1414,7 @@ class _ChatterClient:
 def test_chatter_post_default_returns_preview_without_executing(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     result = server.chatter_post(
@@ -1380,6 +1433,7 @@ def test_chatter_post_default_returns_preview_without_executing(monkeypatch):
 def test_chatter_post_execute_with_valid_approval_posts(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1405,6 +1459,7 @@ def test_chatter_post_execute_with_valid_approval_posts(monkeypatch):
 def test_chatter_post_rejects_token_mismatch(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1426,6 +1481,7 @@ def test_chatter_post_rejects_token_mismatch(monkeypatch):
 def test_chatter_post_requires_confirm_in_gated_mode(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1447,6 +1503,7 @@ def test_chatter_post_requires_confirm_in_gated_mode(monkeypatch):
 def test_chatter_post_direct_mode_posts_immediately(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setenv("MCP_CHATTER_DIRECT", "1")
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient(post_result=999)
 
     result = server.chatter_post(
@@ -1466,6 +1523,7 @@ def test_chatter_post_direct_mode_posts_immediately(monkeypatch):
 def test_chatter_post_validates_inputs(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     empty = server.chatter_post(
@@ -1690,6 +1748,7 @@ def test_aggregate_records_accepts_domain_json_string():
 def test_chatter_post_rejects_negative_record_id(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     result = server.chatter_post(
@@ -1703,6 +1762,7 @@ def test_chatter_post_rejects_negative_record_id(monkeypatch):
 def test_chatter_post_rejects_invalid_model_name(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
 
     result = server.chatter_post(
@@ -1715,6 +1775,7 @@ def test_chatter_post_rejects_invalid_model_name(monkeypatch):
 def test_chatter_post_passes_optional_kwargs_through(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setenv("MCP_CHATTER_DIRECT", "1")
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient(post_result=42)
 
     result = server.chatter_post(
@@ -1737,6 +1798,7 @@ def test_chatter_post_passes_optional_kwargs_through(monkeypatch):
 def test_chatter_post_token_is_deterministic_for_same_payload(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     client = _ChatterClient()
     ctx = FakeCtx(client)
 
@@ -1748,6 +1810,7 @@ def test_chatter_post_token_is_deterministic_for_same_payload(monkeypatch):
 def test_chatter_post_propagates_execute_method_failure(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setenv("MCP_CHATTER_DIRECT", "1")
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
 
     class BoomClient:
         def execute_method(self, *args, **kwargs):
@@ -1775,8 +1838,8 @@ def test_max_smart_fields_invalid_env_falls_back_to_default(monkeypatch):
 def test_mcp_surface_counts_reports_v030_totals():
     server = importlib.import_module("odoo_mcp.server")
     counts = server.mcp_surface_counts()
-    assert counts["tool_count"] == 39
-    assert counts["prompt_count"] == 10
+    assert counts["tool_count"] == 41
+    assert counts["prompt_count"] == 11
     # 1 fixed resource + 3 templates = 4
     assert counts["resource_count"] == 4
 
@@ -1846,6 +1909,7 @@ def test_aggregate_records_response_shape_is_stable():
 def test_chatter_post_preview_response_shape_is_stable(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
 
     response = server.chatter_post(
         FakeCtx(_ChatterClient()),
@@ -2165,6 +2229,37 @@ def test_require_validated_write_approval_clears_expired_records():
         is None
     )
     assert "odoo-write:expired" not in ctx.write_approvals
+
+
+def test_register_write_approval_sweeps_other_expired_records():
+    """An abandoned approval (never executed, never re-looked-up) must not
+    linger forever — including any resolved_binary_values it holds — just
+    because its own token is never queried again after expiry."""
+    server = importlib.import_module("odoo_mcp.server")
+    ctx = server.AppContext()
+    ctx.write_approvals["odoo-write:expired"] = {
+        "approval": {},
+        "payload": {},
+        "validated_at": 0,
+        "expires_at": 0,  # already expired
+        "resolved_binary_values": {"datas": "stale-base64-content"},
+    }
+
+    stored = server.register_write_approval(
+        ctx,
+        {
+            "success": True,
+            "approval": {
+                "token": "odoo-write:new",
+                "model": "res.partner",
+                "operation": "write",
+            },
+        },
+    )
+
+    assert stored is True
+    assert "odoo-write:expired" not in ctx.write_approvals
+    assert "odoo-write:new" in ctx.write_approvals
 
 
 # ----- configured_addons_roots / restrict_addons_paths ------------------
@@ -3112,6 +3207,7 @@ def test_aggregate_records_passes_offset_and_order_in_formatted_path():
 def test_chatter_post_returns_error_for_empty_body_validation_message(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     result = server.chatter_post(
         FakeCtx(_ChatterClient()),
         model="res.partner",
@@ -3691,6 +3787,7 @@ def test_chatter_post_tokens_differ_between_instances(monkeypatch):
     server = importlib.import_module("odoo_mcp.server")
     monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
+    monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     default_client = _NamedClient("default")
     globex_client = _NamedClient("globex")
     ctx = FakeCtx(default_client, clients={"globex": globex_client})
