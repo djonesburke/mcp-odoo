@@ -25,8 +25,24 @@ def _isolate_developer_odoo_config(monkeypatch, tmp_path):
     missing file makes _config_file_paths() raise FileNotFoundError exactly
     like a bare CI runner. Tests that exercise real configs set the variable
     (or clear it and chdir into a tmp dir) themselves, which overrides this.
+
+    The same reasoning covers the policy-file variables. A developer running
+    an MCP server on this box legitimately has ODOO_MCP_POLICY_FILE (and/or
+    ODOO_MCP_FIELD_POLICY_FILE) exported, which silently switches the field
+    ACL and the side-effect method allowlist on for the whole suite — turning
+    dozens of unrelated assertions into a function of that developer's local
+    policy JSON. CI has neither variable, so clearing them here is what makes
+    a local run mean the same thing as a CI run. Tests that want a policy set
+    one explicitly via monkeypatch, which overrides this.
     """
-    for var in ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_PASSWORD"):
+    for var in (
+        "ODOO_URL",
+        "ODOO_DB",
+        "ODOO_USERNAME",
+        "ODOO_PASSWORD",
+        "ODOO_MCP_POLICY_FILE",
+        "ODOO_MCP_FIELD_POLICY_FILE",
+    ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ODOO_CONFIG_FILE", str(tmp_path / "no-odoo-config.json"))
 
