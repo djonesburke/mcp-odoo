@@ -43,7 +43,7 @@ class FakeJsonResponse:
 def build_client(monkeypatch, odoo_client_module):
     calls = []
 
-    def fake_server_proxy(endpoint, transport):
+    def fake_server_proxy(endpoint, transport, allow_none=False):
         calls.append(("ServerProxy", endpoint, type(transport).__name__))
         if endpoint.endswith("/xmlrpc/2/common"):
             return FakeCommonProxy(calls)
@@ -120,6 +120,58 @@ def test_client_initialization_creates_common_and_object_xmlrpc_endpoints(
         ),
         ("authenticate", "demo-db", "demo-user", "demo-password", {}),
     ]
+
+
+def test_client_initialization_enables_allow_none_on_xmlrpc_proxies(
+    monkeypatch, odoo_client_module
+):
+    # Odoo's XML-RPC server emits <nil/>, and write payloads / fields_get metadata
+    # can contain None, so both proxies must be created with allow_none=True or
+    # xmlrpc.client raises "cannot marshal None unless allow_none is enabled".
+    seen: dict[str, bool] = {}
+
+    def fake_server_proxy(endpoint, transport, allow_none=False):
+        seen[endpoint.rsplit("/", 1)[-1]] = allow_none
+        if endpoint.endswith("/xmlrpc/2/common"):
+            return FakeCommonProxy([])
+        if endpoint.endswith("/xmlrpc/2/object"):
+            return FakeObjectProxy([])
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(
+        odoo_client_module.xmlrpc.client, "ServerProxy", fake_server_proxy
+    )
+    odoo_client_module.OdooClient(
+        url="odoo.example.test",
+        db="demo-db",
+        username="demo-user",
+        password="demo-password",
+        timeout=3,
+        verify_ssl=False,
+    )
+
+    assert seen == {"common": True, "object": True}
+
+
+def test_get_model_fields_requests_bounded_marshal_safe_attributes(
+    monkeypatch, odoo_client_module
+):
+    # A full fields_get faults SERVER-SIDE on Odoo 19 when an attribute value is None
+    # (e.g. `domain` on product.pricelist): Odoo's own XML-RPC layer cannot marshal it.
+    # get_model_fields must therefore request only the attributes the server consumes.
+    client, calls = build_client(monkeypatch, odoo_client_module)
+
+    client.get_model_fields("res.partner")
+
+    method_call = calls[-1]
+    assert method_call[0] == "execute_kw"
+    args = method_call[1]
+    assert args[3] == "res.partner"
+    assert args[4] == "fields_get"
+    assert args[6] == {
+        "attributes": odoo_client_module.OdooClient.FIELDS_GET_ATTRIBUTES
+    }
+    assert "domain" not in odoo_client_module.OdooClient.FIELDS_GET_ATTRIBUTES
 
 
 def test_execute_method_passes_database_credentials_model_method_args_and_kwargs(
@@ -237,7 +289,7 @@ def test_profile_helpers_read_version_context_and_installed_modules(
                 return [{"name": "base", "shortdesc": "Base", "state": "installed"}]
             raise AssertionError(f"unexpected call: {model}.{method}")
 
-    def fake_server_proxy(endpoint, transport):
+    def fake_server_proxy(endpoint, transport, allow_none=False):
         calls.append(("ServerProxy", endpoint, type(transport).__name__))
         if endpoint.endswith("/xmlrpc/2/common"):
             return FakeCommonProxy(calls)
@@ -457,7 +509,7 @@ def test_json2_get_server_version_uses_web_version_endpoint(
 def _build_xmlrpc_client_with_lang(monkeypatch, odoo_client_module, lang):
     calls = []
 
-    def fake_server_proxy(endpoint, transport):
+    def fake_server_proxy(endpoint, transport, allow_none=False):
         if endpoint.endswith("/xmlrpc/2/common"):
             return FakeCommonProxy(calls)
         if endpoint.endswith("/xmlrpc/2/object"):
@@ -621,7 +673,7 @@ def test_xmlrpc_connection_error_during_authenticate_raises_connection_error(
         def authenticate(self, *args, **kwargs):
             raise ConnectionError("network down")
 
-    def fake_server_proxy(endpoint, transport):
+    def fake_server_proxy(endpoint, transport, allow_none=False):
         if endpoint.endswith("/xmlrpc/2/common"):
             return BoomCommonProxy()
         return BoomCommonProxy()
@@ -645,7 +697,7 @@ def test_xmlrpc_authenticate_returns_falsy_uid_raises_value_error(
         def authenticate(self, *args, **kwargs):
             return 0  # Falsy → "Authentication failed"
 
-    def fake_server_proxy(endpoint, transport):
+    def fake_server_proxy(endpoint, transport, allow_none=False):
         return FalsyAuthProxy()
 
     monkeypatch.setattr(
@@ -667,7 +719,7 @@ def test_xmlrpc_unexpected_authenticate_error_raises_value_error(
         def authenticate(self, *args, **kwargs):
             raise RuntimeError("something else")
 
-    def fake_server_proxy(endpoint, transport):
+    def fake_server_proxy(endpoint, transport, allow_none=False):
         return BoomProxy()
 
     monkeypatch.setattr(

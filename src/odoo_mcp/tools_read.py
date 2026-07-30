@@ -8,9 +8,10 @@ search_holidays, list_instances, get_odoo_profile, health_check.
 
 import json
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from mcp.server.fastmcp import Context
+from pydantic import Field
 
 from .agent_tools import (
     DEFAULT_MAX_RELEVANT_FIELDS,
@@ -20,6 +21,18 @@ from .agent_tools import (
 from .field_policy import get_field_policy
 from .odoo_client import list_configured_instances
 from .rate_limit import check_rate, rate_report
+from .schemas import (
+    AggregateRecordsResponse,
+    GetModelFieldsResponse,
+    GetOdooProfileResponse,
+    HealthCheckResponse,
+    ListInstancesResponse,
+    ListModelsResponse,
+    ReadAttachmentResponse,
+    ReadRecordResponse,
+    SchemaCatalogResponse,
+    SearchRecordsResponse,
+)
 from .tool_helpers import (
     EmployeeSearchResult,
     Holiday,
@@ -34,6 +47,7 @@ from .server_core import (
     READ_ONLY_TOOL,
     PREVIEW_TOOL,
     mcp,
+    plugin_posture,
     _cached_fields_metadata,
     _resolve_odoo,
     mcp_surface_counts,
@@ -56,10 +70,17 @@ def _srv() -> Any:
 )
 def get_odoo_profile(
     ctx: Context,
-    include_modules: bool = True,
-    module_limit: int = 100,
-    instance: Optional[str] = None,
-) -> Dict[str, Any]:
+    include_modules: Annotated[
+        bool, Field(description="Whether to include installed-module metadata.")
+    ] = True,
+    module_limit: Annotated[
+        int, Field(description="Maximum installed modules to include; capped at 500.")
+    ] = 100,
+    instance: Annotated[
+        Optional[str],
+        Field(description="Optional configured Odoo instance name; uses the default if omitted."),
+    ] = None,
+) -> GetOdooProfileResponse:
     """Return server, user-context, transport, and installed-module metadata."""
     try:
         module_limit = clamp_limit(module_limit, maximum=500)
@@ -101,13 +122,27 @@ def get_odoo_profile(
 )
 def schema_catalog(
     ctx: Context,
-    query: Optional[str] = None,
-    models: Optional[List[str]] = None,
-    include_fields: bool = False,
-    refresh: bool = False,
-    limit: int = 50,
-    instance: Optional[str] = None,
-) -> Dict[str, Any]:
+    query: Annotated[
+        Optional[str], Field(description="Optional text used to filter catalog models.")
+    ] = None,
+    models: Annotated[
+        Optional[List[str]],
+        Field(description="Optional technical model names to include in the catalog."),
+    ] = None,
+    include_fields: Annotated[
+        bool, Field(description="Whether to include field metadata for each model.")
+    ] = False,
+    refresh: Annotated[
+        bool, Field(description="Whether to bypass and refresh the cached catalog.")
+    ] = False,
+    limit: Annotated[
+        int, Field(description="Maximum catalog models to return; capped at 500.")
+    ] = 50,
+    instance: Annotated[
+        Optional[str],
+        Field(description="Optional configured Odoo instance name; uses the default if omitted."),
+    ] = None,
+) -> SchemaCatalogResponse:
     """Return a cached catalog of model names, labels, and optional fields."""
     try:
         limit = clamp_limit(limit, maximum=500)
@@ -192,7 +227,7 @@ def schema_catalog(
     annotations=PREVIEW_TOOL,
     structured_output=True,
 )
-def health_check() -> Dict[str, Any]:
+def health_check() -> HealthCheckResponse:
     """Return local process health and hardening flags without opening Odoo."""
     surface_counts = mcp_surface_counts()
     return {
@@ -205,6 +240,7 @@ def health_check() -> Dict[str, Any]:
         },
         "runtime": runtime_security_report(),
         "rate_limits": rate_report(),
+        "plugins": plugin_posture(),
     }
 
 
@@ -213,7 +249,7 @@ def health_check() -> Dict[str, Any]:
     annotations=PREVIEW_TOOL,
     structured_output=True,
 )
-def list_instances() -> Dict[str, Any]:
+def list_instances() -> ListInstancesResponse:
     """List configured Odoo instances (name, url, db, transport) — never credentials."""
     try:
         instances = list_configured_instances()
@@ -244,7 +280,7 @@ def list_models(
     query: Optional[str] = None,
     limit: int = 100,
     instance: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> ListModelsResponse:
     """
     List available Odoo model technical names and display names.
 
@@ -293,7 +329,7 @@ def get_model_fields(
     relevance: Optional[str] = None,
     max_fields: int = DEFAULT_MAX_RELEVANT_FIELDS,
     instance: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> GetModelFieldsResponse:
     """
     Read field definitions for a model.
 
@@ -363,7 +399,7 @@ def search_records(
     order: Optional[str] = None,
     query: Optional[str] = None,
     instance: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> SearchRecordsResponse:
     """
     Search and read records with bounded read-only semantics.
 
@@ -436,7 +472,7 @@ def read_record(
     record_id: int,
     fields: Optional[List[str]] = None,
     instance: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> ReadRecordResponse:
     """
     Read one record by ID with bounded read-only semantics.
 
@@ -489,7 +525,7 @@ def read_attachment(
     attachment_id: int,
     include_data: bool = True,
     instance: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> ReadAttachmentResponse:
     """
     Read one ir.attachment record: metadata always, base64 content when it
     fits under the cap (ODOO_MCP_MAX_ATTACHMENT_BYTES, default 1 MiB).
@@ -586,7 +622,7 @@ def aggregate_records(
     offset: int = 0,
     order: Optional[str] = None,
     instance: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> AggregateRecordsResponse:
     """Group records server-side and aggregate measures.
 
     ``measures`` are ``"field:agg"`` strings (default agg ``sum``).
@@ -742,10 +778,17 @@ def search_employee(
 )
 def search_holidays(
     ctx: Context,
-    start_date: str,
-    end_date: str,
-    employee_id: Optional[int] = None,
-    instance: Optional[str] = None,
+    start_date: Annotated[
+        str, Field(description="Start date in YYYY-MM-DD format.")
+    ],
+    end_date: Annotated[str, Field(description="End date in YYYY-MM-DD format.")],
+    employee_id: Annotated[
+        Optional[int], Field(description="Optional employee ID used to filter holidays.")
+    ] = None,
+    instance: Annotated[
+        Optional[str],
+        Field(description="Optional configured Odoo instance name; uses the default if omitted."),
+    ] = None,
 ) -> SearchHolidaysResponse:
     """
     Searches for holidays within a specified date range.

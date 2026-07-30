@@ -98,9 +98,39 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
 # MCP instance (shared singleton — re-exported from server.py)
 # ---------------------------------------------------------------------------
 
+DEFAULT_SERVER_INSTRUCTIONS = "MCP Server for interacting with Odoo ERP systems"
+MAX_INSTRUCTIONS_CHARS = 16_000
+
+
+def load_server_instructions() -> str:
+    """Server-level MCP instructions, optionally extended from a file.
+
+    ``ODOO_MCP_INSTRUCTIONS_FILE`` points at a plain-text file whose content
+    is appended to the default instructions and surfaced to every client via
+    the MCP ``instructions`` field — deployment-specific guidance without
+    touching tool descriptions (idea: GH-19, thanks @oadiazp). A set-but-
+    unreadable path fails at startup rather than silently running without
+    the operator's guidance.
+    """
+    path = os.environ.get("ODOO_MCP_INSTRUCTIONS_FILE", "").strip()
+    if not path:
+        return DEFAULT_SERVER_INSTRUCTIONS
+    try:
+        text = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(
+            f"ODOO_MCP_INSTRUCTIONS_FILE is set but unreadable: {exc}"
+        ) from exc
+    if not text:
+        return DEFAULT_SERVER_INSTRUCTIONS
+    if len(text) > MAX_INSTRUCTIONS_CHARS:
+        text = text[:MAX_INSTRUCTIONS_CHARS]
+    return f"{DEFAULT_SERVER_INSTRUCTIONS}\n\n{text}"
+
+
 mcp = FastMCP(
     "Odoo MCP Server",
-    instructions="MCP Server for interacting with Odoo ERP systems",
+    instructions=load_server_instructions(),
     dependencies=["requests"],
     lifespan=app_lifespan,
 )
@@ -225,8 +255,38 @@ def write_approval_payload(approval: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def register_write_approval(app_context: AppContext, report: Dict[str, Any]) -> bool:
-    """Persist validated write approvals inside the current server lifespan."""
+def _sweep_expired_write_approvals(app_context: AppContext, now: float) -> None:
+    """Evict expired write-approval records so their contents stop lingering.
+
+    An approval a caller validates but never executes otherwise sits in
+    ``app_context.write_approvals`` until *that exact token* is looked up
+    again after expiry (``require_validated_write_approval`` only evicts on
+    access). That is especially costly for ``*_from_path`` uploads, whose
+    ``resolved_binary_values`` hold a full file's base64 content server-side
+    (see ``register_write_approval``) — abandoned approvals would otherwise
+    keep that content in memory indefinitely.
+    """
+    expired_tokens = [
+        token
+        for token, record in app_context.write_approvals.items()
+        if now > float(record.get("expires_at", 0))
+    ]
+    for token in expired_tokens:
+        app_context.write_approvals.pop(token, None)
+
+
+def register_write_approval(
+    app_context: AppContext,
+    report: Dict[str, Any],
+    resolved_binary_values: Optional[Dict[str, str]] = None,
+) -> bool:
+    """Persist validated write approvals inside the current server lifespan.
+
+    ``resolved_binary_values`` (field name -> real base64), when given, is
+    stored only in this server-side record — never in ``report["approval"]``,
+    which is what gets echoed back to the caller and hashed into the approval
+    token. See ``_resolve_binary_from_path_fields`` in ``tools_write.py``.
+    """
     approval = report.get("approval")
     if not report.get("success") or not isinstance(approval, dict):
         return False
@@ -234,12 +294,16 @@ def register_write_approval(app_context: AppContext, report: Dict[str, Any]) -> 
     if not token:
         return False
     now = time.time()
-    app_context.write_approvals[token] = {
+    _sweep_expired_write_approvals(app_context, now)
+    record: Dict[str, Any] = {
         "approval": dict(approval),
         "payload": write_approval_payload(approval),
         "validated_at": now,
         "expires_at": now + WRITE_APPROVAL_TTL_SECONDS,
     }
+    if resolved_binary_values:
+        record["resolved_binary_values"] = dict(resolved_binary_values)
+    app_context.write_approvals[token] = record
     approval["validated_at"] = now
     approval["expires_at"] = now + WRITE_APPROVAL_TTL_SECONDS
     return True
@@ -302,6 +366,46 @@ def restrict_addons_paths(addons_paths: Optional[List[str]]) -> Optional[List[st
             )
         restricted_paths.append(str(candidate))
     return restricted_paths
+
+
+# ---------------------------------------------------------------------------
+# Attachment upload path helpers
+# ---------------------------------------------------------------------------
+
+
+def configured_attachment_upload_roots() -> List[Path]:
+    """Return trusted local roots operators allow ``*_from_path`` uploads from."""
+    roots: List[Path] = []
+    for raw_path in os.environ.get("ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS", "").split(
+        os.pathsep
+    ):
+        if not raw_path:
+            continue
+        roots.append(Path(raw_path).expanduser().resolve(strict=False))
+    return roots
+
+
+def restrict_attachment_upload_path(raw_path: str) -> Path:
+    """Resolve and confine a ``*_from_path`` value to configured upload roots.
+
+    Fails closed: ``ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS`` must be set, and the
+    resolved path must sit inside one of its roots. Without this, a
+    prompt-injected agent could read and exfiltrate arbitrary local files
+    (SSH keys, other clients' data, ...) as an Odoo attachment — mirrors
+    ``restrict_addons_paths`` above.
+    """
+    roots = configured_attachment_upload_roots()
+    if not roots:
+        raise ValueError(
+            "*_from_path uploads require ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS to be "
+            "set to one or more trusted local directories."
+        )
+    candidate = Path(raw_path).expanduser().resolve(strict=False)
+    if not any(candidate == root or _is_relative_to(candidate, root) for root in roots):
+        raise ValueError(
+            f"{candidate} is outside configured ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS."
+        )
+    return candidate
 
 
 # ---------------------------------------------------------------------------
@@ -544,3 +648,99 @@ def search_records_resource(model_name: str, domain: str) -> str:
         return json.dumps(filtered, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Plugin loading + per-deployment tool filtering (driven from server.py)
+# ---------------------------------------------------------------------------
+
+PLUGIN_STATE: Dict[str, Any] = {
+    "enabled": [],
+    "loaded": [],
+    "failed": {},
+    "tools_filtered": [],
+}
+
+
+def plugin_posture() -> Dict[str, Any]:
+    """Non-secret plugin/filter posture for health_check."""
+    return {
+        "enabled": list(PLUGIN_STATE["enabled"]),
+        "loaded": list(PLUGIN_STATE["loaded"]),
+        "failed": dict(PLUGIN_STATE["failed"]),
+        "tools_filtered": list(PLUGIN_STATE["tools_filtered"]),
+    }
+
+
+def load_plugins(plugin_api: Any) -> None:
+    """Load opt-in third-party tool plugins (entry points ``odoo_mcp.tools``).
+
+    Installation alone never activates code: only names listed in
+    ``ODOO_MCP_PLUGINS`` load, and each plugin is isolated — a raising
+    plugin is recorded in health_check, never fatal. The caller (server.py,
+    top layer) passes the ``odoo_mcp.plugin_api`` module so this bottom
+    layer never imports the surface.
+    """
+    raw = os.environ.get("ODOO_MCP_PLUGINS", "")
+    requested = [name.strip() for name in raw.split(",") if name.strip()]
+    PLUGIN_STATE["enabled"] = requested
+    PLUGIN_STATE["loaded"] = []
+    PLUGIN_STATE["failed"] = {}
+    if not requested:
+        return
+
+    from importlib.metadata import entry_points
+
+    found = {ep.name: ep for ep in entry_points(group="odoo_mcp.tools")}
+
+    for name in requested:
+        entry = found.get(name)
+        if entry is None:
+            PLUGIN_STATE["failed"][name] = (
+                "no installed package exposes odoo_mcp.tools entry point "
+                f"named {name!r}"
+            )
+            continue
+        try:
+            register = entry.load()
+            register(plugin_api)
+            PLUGIN_STATE["loaded"].append(name)
+        except Exception as exc:  # noqa: BLE001 — plugin faults must not kill the server
+            PLUGIN_STATE["failed"][name] = f"{type(exc).__name__}: {exc}"
+
+
+def apply_tool_filter() -> None:
+    """Trim the registered tool surface per deployment.
+
+    ``ODOO_MCP_TOOLS_INCLUDE`` / ``ODOO_MCP_TOOLS_EXCLUDE`` take CSV fnmatch
+    globs (e.g. ``search_*,read_record``). Include (when set) keeps only
+    matching tools; exclude then removes matches. Applies to builtin and
+    plugin tools alike; removed names are listed in health_check.
+    """
+    from fnmatch import fnmatch
+
+    include = [
+        p.strip()
+        for p in os.environ.get("ODOO_MCP_TOOLS_INCLUDE", "").split(",")
+        if p.strip()
+    ]
+    exclude = [
+        p.strip()
+        for p in os.environ.get("ODOO_MCP_TOOLS_EXCLUDE", "").split(",")
+        if p.strip()
+    ]
+    PLUGIN_STATE["tools_filtered"] = []
+    if not include and not exclude:
+        return
+    registry = getattr(mcp._tool_manager, "_tools", None)
+    if not isinstance(registry, dict):  # unexpected SDK shape — do nothing
+        return
+    removed = []
+    for name in list(registry):
+        keep = (not include or any(fnmatch(name, pat) for pat in include)) and (
+            not any(fnmatch(name, pat) for pat in exclude)
+        )
+        if not keep:
+            del registry[name]
+            removed.append(name)
+    PLUGIN_STATE["tools_filtered"] = sorted(removed)

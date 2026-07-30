@@ -8,6 +8,9 @@ Provides MCP tools and resources for interacting with Odoo ERP systems
 
 # Import core first (creates mcp instance, AppContext, resources)
 from .server_core import (
+    apply_tool_filter,
+    load_plugins,
+    plugin_posture,
     DESTRUCTIVE_TOOL,
     ELICIT_WRITES_ENV,
     N_PLUS_ONE_WARN_THRESHOLD,
@@ -26,6 +29,7 @@ from .server_core import (
     _single_read_lock,
     app_lifespan,
     configured_addons_roots,
+    configured_attachment_upload_roots,
     get_model_info,
     get_models,
     get_record,
@@ -40,6 +44,7 @@ from .server_core import (
     resolve_instance_name,
     resolve_read_fields,
     restrict_addons_paths,
+    restrict_attachment_upload_path,
     runtime_security_report,
     search_records_resource,
     write_approval_payload,
@@ -63,6 +68,7 @@ from .agent_tools import (
 )
 
 # Import tool/prompt modules — side-effect: registers @mcp.tool / @mcp.prompt decorators
+from . import tools_data_quality
 from . import tools_diagnostics
 from . import tools_read
 from . import tools_write
@@ -104,7 +110,11 @@ from .tools_read import (
 )
 
 # Re-export diagnostics tool functions
+from .tools_data_quality import (
+    data_quality_report,
+)
 from .tools_diagnostics import (
+    analyze_upgrade_log,
     build_domain,
     business_pack_report,
     diagnose_access,
@@ -175,6 +185,7 @@ from .tool_helpers import (
     _AGGREGATION_FUNCTIONS,
     ATTACHMENT_BYTES_HARD_CAP,
     DEFAULT_MAX_ATTACHMENT_BYTES,
+    DEFAULT_MAX_ATTACHMENT_UPLOAD_BYTES,
     DEFAULT_MAX_SMART_FIELDS,
     MAX_SEARCH_LIMIT,
     METHOD_NAME_RE,
@@ -183,6 +194,7 @@ from .tool_helpers import (
     SearchDomain,
     clamp_limit,
     max_attachment_bytes,
+    max_attachment_upload_bytes,
     max_smart_fields,
     normalize_domain_input,
     odoo_major_version,
@@ -286,6 +298,8 @@ __all__ = [
     "lookup_model_history",
     "fit_gap_report",
     "scan_addons_source",
+    "data_quality_report",
+    "analyze_upgrade_log",
     "build_domain",
     "business_pack_report",
     # Knowledge tools
@@ -326,6 +340,7 @@ __all__ = [
     "_AGGREGATION_FUNCTIONS",
     "ATTACHMENT_BYTES_HARD_CAP",
     "DEFAULT_MAX_ATTACHMENT_BYTES",
+    "DEFAULT_MAX_ATTACHMENT_UPLOAD_BYTES",
     "DEFAULT_MAX_SMART_FIELDS",
     "MAX_SEARCH_LIMIT",
     "METHOD_NAME_RE",
@@ -334,6 +349,7 @@ __all__ = [
     "SearchDomain",
     "clamp_limit",
     "max_attachment_bytes",
+    "max_attachment_upload_bytes",
     "max_smart_fields",
     "normalize_domain_input",
     "odoo_major_version",
@@ -375,6 +391,7 @@ __all__ = [
     "N_PLUS_ONE_WARN_THRESHOLD",
     "N_PLUS_ONE_WINDOW_SECONDS",
     "configured_addons_roots",
+    "configured_attachment_upload_roots",
     "instance_posture",
     "mcp_surface_counts",
     "n_plus_one_report",
@@ -383,7 +400,11 @@ __all__ = [
     "require_validated_write_approval",
     "resolve_read_fields",
     "restrict_addons_paths",
+    "restrict_attachment_upload_path",
     "runtime_security_report",
+    "load_plugins",
+    "apply_tool_filter",
+    "plugin_posture",
     "_cached_fields_metadata",
     "_is_relative_to",
     "_resolve_odoo",
@@ -396,3 +417,15 @@ __all__ = [
     "_execute_approved_write_gated",
     "_write_elicitation_message",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Opt-in third-party plugins + per-deployment tool filtering.
+# Runs after every builtin registration above; both are no-ops without their
+# env vars (ODOO_MCP_PLUGINS, ODOO_MCP_TOOLS_INCLUDE/EXCLUDE).
+# ---------------------------------------------------------------------------
+
+from . import plugin_api as _plugin_api  # noqa: E402 — after tool registration
+
+load_plugins(_plugin_api)
+apply_tool_filter()
