@@ -1516,6 +1516,13 @@ async def mcp_streamable_http_smoke(
             "MCP_HTTP_HOST": "127.0.0.1",
             "MCP_HTTP_PORT": str(target.mcp_port),
             "MCP_HTTP_PATH": "/mcp",
+            # HTTP transports refuse to start unauthenticated, including on
+            # 127.0.0.1, because a loopback bind is not evidence the endpoint
+            # is private (the production topology fronts one with a tunnel).
+            # This smoke is a throwaway CI-local server with no network
+            # exposure, which is exactly the case the escape hatch names.
+            # The gate itself is covered by tests/test_static_auth.py.
+            "MCP_ALLOW_UNAUTHENTICATED_HTTP": "1",
         }
     )
     process = subprocess.Popen(
