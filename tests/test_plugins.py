@@ -3,6 +3,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from odoo_mcp import plugin_api, server, server_core
 
 
@@ -89,6 +91,77 @@ def test_filter_noop_without_env(monkeypatch):
     server_core.apply_tool_filter()
     assert len(_tools()) == count_before
     assert server_core.plugin_posture()["tools_filtered"] == []
+
+
+# ----- fail-closed on an unexpected SDK registry shape ---------------------
+
+
+@pytest.mark.parametrize(
+    "shape", [None, [], "not-a-dict"], ids=["missing", "list", "str"]
+)
+def test_filter_raises_when_registry_shape_is_unexpected(monkeypatch, shape):
+    """A requested filter that cannot be applied must not pass silently.
+
+    apply_tool_filter reaches into the private mcp._tool_manager._tools. If the
+    SDK renames it, the old code returned quietly and the operator kept every
+    tool they asked to remove — failing open, with no signal. It now raises.
+    """
+    monkeypatch.setenv("ODOO_MCP_TOOLS_INCLUDE", "health_check")
+    monkeypatch.setattr(
+        server_core.mcp, "_tool_manager", SimpleNamespace(_tools=shape), raising=False
+    )
+
+    with pytest.raises(RuntimeError, match="not the expected mapping"):
+        server_core.apply_tool_filter()
+
+
+def test_filter_raises_for_exclude_only_requests(monkeypatch):
+    """EXCLUDE alone is a filter request too — it must fail closed as well."""
+    monkeypatch.delenv("ODOO_MCP_TOOLS_INCLUDE", raising=False)
+    monkeypatch.setenv("ODOO_MCP_TOOLS_EXCLUDE", "unlink_*")
+    monkeypatch.setattr(
+        server_core.mcp, "_tool_manager", SimpleNamespace(_tools=None), raising=False
+    )
+
+    with pytest.raises(RuntimeError):
+        server_core.apply_tool_filter()
+
+
+def test_unexpected_shape_is_tolerated_when_no_filter_requested(monkeypatch):
+    """The raise is reachable only when filtering was explicitly asked for.
+
+    With neither env var set the function short-circuits before touching the
+    registry, so a future SDK rename cannot break a default deployment.
+    """
+    monkeypatch.delenv("ODOO_MCP_TOOLS_INCLUDE", raising=False)
+    monkeypatch.delenv("ODOO_MCP_TOOLS_EXCLUDE", raising=False)
+    monkeypatch.setattr(
+        server_core.mcp, "_tool_manager", SimpleNamespace(_tools=None), raising=False
+    )
+
+    server_core.apply_tool_filter()  # must not raise
+
+    assert server_core.plugin_posture()["tools_filtered"] == []
+
+
+def test_health_check_still_reports_tools_filtered(monkeypatch):
+    """The audit readout survives the patch — it is what makes the control checkable."""
+    from odoo_mcp.tools_read import health_check
+
+    registry = server.mcp._tool_manager._tools
+    before = dict(registry)
+    try:
+        monkeypatch.setenv("ODOO_MCP_TOOLS_INCLUDE", "search_records,health_check")
+        server_core.apply_tool_filter()
+
+        filtered = health_check()["plugins"]["tools_filtered"]
+        assert "read_record" in filtered
+        assert "search_records" not in filtered
+    finally:
+        registry.clear()
+        registry.update(before)
+        monkeypatch.delenv("ODOO_MCP_TOOLS_INCLUDE", raising=False)
+        server_core.apply_tool_filter()
 
 
 def test_health_check_reports_plugin_posture():

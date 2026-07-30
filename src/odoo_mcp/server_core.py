@@ -716,6 +716,12 @@ def apply_tool_filter() -> None:
     globs (e.g. ``search_*,read_record``). Include (when set) keeps only
     matching tools; exclude then removes matches. Applies to builtin and
     plugin tools alike; removed names are listed in health_check.
+
+    Filtering reaches into a private FastMCP attribute. If that attribute is
+    ever renamed, the filter cannot be applied — so when a filter was asked
+    for and the registry is not the expected shape, this raises rather than
+    returning quietly. Silently keeping the full tool surface would hand the
+    operator strictly *more* tools than they asked for, with no signal.
     """
     from fnmatch import fnmatch
 
@@ -732,9 +738,17 @@ def apply_tool_filter() -> None:
     PLUGIN_STATE["tools_filtered"] = []
     if not include and not exclude:
         return
+    # Only reachable when a filter was explicitly requested: the no-filter
+    # case returned above, so raising here cannot affect default operation.
     registry = getattr(mcp._tool_manager, "_tools", None)
-    if not isinstance(registry, dict):  # unexpected SDK shape — do nothing
-        return
+    if not isinstance(registry, dict):
+        raise RuntimeError(
+            "ODOO_MCP_TOOLS_INCLUDE/EXCLUDE is set, but the FastMCP tool "
+            "registry is not the expected mapping "
+            f"(mcp._tool_manager._tools is {type(registry).__name__}). "
+            "Refusing to start with an unfiltered tool surface. Unset the "
+            "filter to run with all tools, or pin a compatible mcp version."
+        )
     removed = []
     for name in list(registry):
         keep = (not include or any(fnmatch(name, pat) for pat in include)) and (
