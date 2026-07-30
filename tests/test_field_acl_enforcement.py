@@ -103,16 +103,31 @@ def test_resource_get_record_redacts(deny_credit_limit, monkeypatch):
     assert payload["_redacted_fields"] == ["credit_limit"]
 
 
-def test_no_policy_is_byte_identical():
-    reset_field_policy()
-    import os
+def test_no_policy_is_byte_identical(monkeypatch, tmp_path):
+    """With no policy configured anywhere, reads pass through untouched.
 
-    os.environ.pop("ODOO_MCP_FIELD_POLICY_FILE", None)
-    os.environ.pop("ODOO_MCP_POLICY_FILE", None)
+    Clearing the two env vars is not enough to reach the no-policy state:
+    policy_file_path() then falls back to the bare relative filename
+    "odoo_mcp_policy.json", which resolves against the current working
+    directory — the repo root under pytest, where this project ships one. So
+    the cwd is moved to an empty tmp_path as well; without that, this test
+    asserts against whatever policy the repo happens to carry rather than
+    against no policy at all.
+
+    Uses monkeypatch rather than os.environ.pop so the cleared variables are
+    restored afterwards, and resets the process-wide policy cache on the way
+    out so a "no policy" verdict does not leak into later tests.
+    """
+    monkeypatch.delenv("ODOO_MCP_FIELD_POLICY_FILE", raising=False)
+    monkeypatch.delenv("ODOO_MCP_POLICY_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
     reset_field_policy()
-    out = server.search_records(FakeCtx(PolicyClient()), model="res.partner")
-    assert "redacted_fields" not in out
-    assert all("credit_limit" in row for row in out["result"])
+    try:
+        out = server.search_records(FakeCtx(PolicyClient()), model="res.partner")
+        assert "redacted_fields" not in out
+        assert all("credit_limit" in row for row in out["result"])
+    finally:
+        reset_field_policy()
 
 
 class _EchoLife:
