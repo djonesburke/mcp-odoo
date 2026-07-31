@@ -1153,6 +1153,96 @@ async def mcp_stdio_smoke(
                     f"aggregate_records picked wrong method (expected {expected_method}): {aggregate}"
                 )
 
+            # This session runs with writes disabled (see the execute_approved_write
+            # fail-closed assertion above), so chatter_post must refuse as well:
+            # message_post writes a mail.message, and a `comment` notifies followers
+            # by email. The writes-enabled round-trip lives in
+            # mcp_chatter_write_smoke, which runs against the same instance.
+            chatter_blocked = decode_tool_json(
+                await session.call_tool(
+                    "chatter_post",
+                    arguments={
+                        "model": "res.partner",
+                        "record_id": 1,
+                        "body": "Smoke chatter must not post while writes are disabled",
+                    },
+                ),
+                "chatter_post",
+            )
+            if chatter_blocked.get("success") or "disabled" not in str(
+                chatter_blocked.get("error")
+            ):
+                raise AssertionError(
+                    f"chatter_post did not fail closed while writes disabled: {chatter_blocked}"
+                )
+            if chatter_blocked.get("approval") or chatter_blocked.get("mode") == "preview":
+                raise AssertionError(
+                    f"chatter_post issued an approval token while refusing: {chatter_blocked}"
+                )
+            chatter_not_persisted = decode_tool_json(
+                await session.call_tool(
+                    "search_records",
+                    arguments={
+                        "model": "mail.message",
+                        "domain": [
+                            ["model", "=", "res.partner"],
+                            ["res_id", "=", 1],
+                            ["body", "ilike", "must not post"],
+                        ],
+                        "fields": ["id"],
+                        "limit": 5,
+                    },
+                ),
+                "search_records",
+            )
+            if chatter_not_persisted.get("count", 0) != 0:
+                raise AssertionError(
+                    f"refused chatter_post still persisted a mail.message: {chatter_not_persisted}"
+                )
+
+            return {
+                "transport": transport,
+                "tools": sorted(tool_names),
+                "resource_count": len(resource_uris),
+                "resource_template_count": len(template_uris),
+                "prompt_count": len(prompt_names),
+                "mcp_partner_sample_count": len(payload_result),
+                "diagnostic_tools_smoke": True,
+                "agent_tools_smoke": True,
+                "smart_fields_smoke": True,
+                "aggregate_records_smoke": True,
+                "chatter_post_smoke": True,
+                "chatter_write_gate_smoke": True,
+                "chatter_refused_message_count": chatter_not_persisted.get("count", 0),
+                "aggregate_method": aggregate.get("method"),
+            }
+
+
+async def mcp_chatter_write_smoke(
+    target: VersionTarget,
+    *,
+    transport: str = "xmlrpc",
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Chatter preview -> execute round-trip with ODOO_MCP_ENABLE_WRITES=1.
+
+    Runs in its own server process because the main stdio smoke deliberately
+    runs writes-disabled to assert the gates fail closed. Keeping the two in
+    separate sessions lets each prove its own half against the same live Odoo:
+    that a refused post writes nothing, and that an enabled post really does
+    reach message_post.
+    """
+    env = mcp_env(target, transport=transport, api_key=api_key)
+    env["ODOO_MCP_ENABLE_WRITES"] = "1"
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "odoo_mcp"],
+        env=env,
+    )
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
             chatter_body = "Smoke chatter execute round-trip"
             chatter_preview = decode_tool_json(
                 await session.call_tool(
@@ -1190,13 +1280,12 @@ async def mcp_stdio_smoke(
                 "chatter_post",
             )
             if not chatter_executed.get("success"):
-                raise AssertionError(
-                    f"chatter_post execute failed: {chatter_executed}"
-                )
+                raise AssertionError(f"chatter_post execute failed: {chatter_executed}")
             if chatter_executed.get("mode") != "execute":
                 raise AssertionError(
                     f"chatter_post execute mode mismatch: {chatter_executed}"
                 )
+
             chatter_persisted = decode_tool_json(
                 await session.call_tool(
                     "search_records",
@@ -1220,19 +1309,8 @@ async def mcp_stdio_smoke(
 
             return {
                 "transport": transport,
-                "tools": sorted(tool_names),
-                "resource_count": len(resource_uris),
-                "resource_template_count": len(template_uris),
-                "prompt_count": len(prompt_names),
-                "mcp_partner_sample_count": len(payload_result),
-                "diagnostic_tools_smoke": True,
-                "agent_tools_smoke": True,
-                "smart_fields_smoke": True,
-                "aggregate_records_smoke": True,
-                "chatter_post_smoke": True,
                 "chatter_execute_smoke": True,
                 "chatter_persisted_message_count": chatter_persisted.get("count", 0),
-                "aggregate_method": aggregate.get("method"),
             }
 
 
@@ -1438,6 +1516,13 @@ async def mcp_streamable_http_smoke(
             "MCP_HTTP_HOST": "127.0.0.1",
             "MCP_HTTP_PORT": str(target.mcp_port),
             "MCP_HTTP_PATH": "/mcp",
+            # HTTP transports refuse to start unauthenticated, including on
+            # 127.0.0.1, because a loopback bind is not evidence the endpoint
+            # is private (the production topology fronts one with a tunnel).
+            # This smoke is a throwaway CI-local server with no network
+            # exposure, which is exactly the case the escape hatch names.
+            # The gate itself is covered by tests/test_static_auth.py.
+            "MCP_ALLOW_UNAUTHENTICATED_HTTP": "1",
         }
     )
     process = subprocess.Popen(
@@ -1650,6 +1735,9 @@ def smoke_one(
             direct_json2_smoke(target, json2_api_key) if json2_api_key else None
         )
         mcp_result = asyncio.run(mcp_stdio_smoke(target, transport="xmlrpc"))
+        chatter_write_result = asyncio.run(
+            mcp_chatter_write_smoke(target, transport="xmlrpc")
+        )
         restricted_access = asyncio.run(
             mcp_restricted_access_smoke(
                 target,
@@ -1709,6 +1797,7 @@ def smoke_one(
             "uid": uid,
             "direct_xmlrpc": direct,
             "mcp_stdio": mcp_result,
+            "chatter_write_xmlrpc": chatter_write_result,
             "restricted_user": restricted_user,
             "restricted_access_xmlrpc": restricted_access,
             "status": "passed",
