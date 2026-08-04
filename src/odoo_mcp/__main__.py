@@ -19,6 +19,19 @@ from .server_core import package_version
 
 SUPPORTED_MCP_TRANSPORTS = {"stdio", "streamable-http", "sse"}
 SECRET_ENV_KEYS = {"ODOO_PASSWORD", "ODOO_API_KEY", "MCP_HTTP_AUTH_TOKEN"}
+# Markers that identify a credential-bearing variable name. Matched as
+# substrings against the name with "_" and "-" removed, so every spelling of
+# API_KEY / APIKEY / API-KEY collapses to one case. See is_secret_env_key.
+SECRET_ENV_MARKERS = (
+    "PASSWORD",
+    "PASSWD",
+    "APIKEY",
+    "ACCESSKEY",
+    "PRIVATEKEY",
+    "SECRET",
+    "TOKEN",
+    "CREDENTIAL",
+)
 LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 DEFAULT_ALLOWED_ORIGINS = [
@@ -145,15 +158,27 @@ def parse_csv_env(value: str | None) -> list[str]:
 
 
 def is_secret_env_key(key: str) -> bool:
-    """Keep secrets out of startup logs."""
+    """Keep secrets out of startup logs.
+
+    Startup logging echoes every ``ODOO_*`` / ``MCP_*`` variable to stderr, so
+    this predicate is the only thing between a credential and the log.
+
+    It matches *substrings* of the separator-stripped name rather than exact
+    suffixes. The previous suffix list masked ``ODOO_PROD_API_KEY`` but not
+    ``ODOO_PROD_APIKEY`` — the same secret under a different spelling — and
+    printed it in clear text on every server start. Stripping ``_`` and ``-``
+    first makes ``API_KEY``, ``APIKEY``, and ``API-KEY`` all normalise to one
+    thing, so a spelling variant cannot reopen the hole. Dropping the ``_``
+    prefix requirement also covers a bare ``APIKEY`` or ``SECRET``.
+
+    Deliberately biased toward over-masking: hiding a non-secret variable costs
+    one line of diagnostics, whereas leaking a production API key does not.
+    """
     upper_key = key.upper()
-    return (
-        upper_key in SECRET_ENV_KEYS
-        or upper_key.endswith("_PASSWORD")
-        or upper_key.endswith("_TOKEN")
-        or upper_key.endswith("_API_KEY")
-        or upper_key.endswith("_SECRET")
-    )
+    if upper_key in SECRET_ENV_KEYS:
+        return True
+    normalized = upper_key.replace("_", "").replace("-", "")
+    return any(marker in normalized for marker in SECRET_ENV_MARKERS)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
