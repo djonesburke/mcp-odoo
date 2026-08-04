@@ -1,0 +1,96 @@
+{
+  "comment": "Burke Truck & Equipment — reviewed side-effect methods for execute_method. Change only via PR.",
+  "allowed_side_effect_methods": [],
+  "field_acl_comment": "Read-path field ACL. Per instance ('default' = default instance), per model, exactly one of 'deny' (blacklist) or 'allow' (exclusive whitelist). '*' is a per-instance model wildcard. hr.employee uses 'allow' deliberately: an exclusive whitelist is strictly stricter than enumerating PII to deny, and it stays safe when Odoo adds new sensitive fields on upgrade. hr.version (Odoo 19 contract/wage model) keeps an explicit deny list because it has no small readable subset. Change only via PR.",
+  "field_acl": {
+    "default": {
+      "*": {
+        "deny": ["message_ids"]
+      },
+      "hr.employee": {
+        "allow": [
+          "name",
+          "work_email",
+          "department_id",
+          "job_id",
+          "parent_id"
+        ]
+      },
+      "hr.version": {
+        "deny": [
+          "identification_id",
+          "passport_id",
+          "ssnid",
+          "sinid",
+          "visa_no",
+          "permit_no",
+          "birthday",
+          "place_of_birth",
+          "country_of_birth",
+          "private_street",
+          "private_street2",
+          "private_city",
+          "private_zip",
+          "private_state_id",
+          "private_country_id",
+          "private_email",
+          "private_phone",
+          "private_car_plate",
+          "emergency_contact",
+          "emergency_phone",
+          "marital",
+          "children",
+          "spouse_complete_name",
+          "spouse_birthdate",
+          "km_home_work",
+          "study_field",
+          "study_school",
+          "certificate",
+          "additional_note",
+          "wage",
+          "contract_wage"
+        ]
+      },
+      "res.partner": {
+        "deny": [
+          "credit_limit",
+          "comment",
+          "debit",
+          "credit",
+          "total_due",
+          "credit_to_invoice"
+        ]
+      },
+      "res.partner.bank": {
+        "deny": [
+          "acc_number",
+          "sanitized_acc_number",
+          "acc_holder_name"
+        ]
+      },
+      "sale.order": {
+        "deny": [
+          "margin",
+          "margin_percent"
+        ]
+      },
+      "sale.order.line": {
+        "deny": [
+          "purchase_price",
+          "margin",
+          "margin_percent"
+        ]
+      },
+      "product.template": {
+        "deny": [
+          "standard_price"
+        ]
+      },
+      "product.product": {
+        "deny": [
+          "standard_price"
+        ]
+      }
+    }
+  }
+}

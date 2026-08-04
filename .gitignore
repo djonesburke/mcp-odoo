@@ -66,3 +66,19 @@ AGENTS.md
 # Local harness CI workflows depend on the untracked .harness/ toolchain
 .github/workflows/harness.yml
 .github/workflows/eval-nightly.yml
+
+# --- Burke Truck & Equipment ---------------------------------------------
+# This fork is a PUBLIC repository. Nothing below may ever be committed.
+#
+# Credential-bearing runtime config (odoo_config.json and .env are already
+# covered above; config.json is the alternate name the server also accepts).
+config.json
+
+# Audit logs — every MCP call with its model, domain, and record ids.
+*.jsonl
+
+# Burke-internal operational analysis and Odoo data exports. These contain
+# production posture, infrastructure detail, and customer records.
+RECON.md
+_dryrun_out/
+BURKE-OPS-RUNBOOK.md
