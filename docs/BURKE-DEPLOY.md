@@ -16,12 +16,19 @@ pinned build across all Burke PCs.
 | Package version | `1.3.0+burke.1` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
-| Burke delta | two write-safety behaviors (§5) + field-ACL policy + this doc |
+| Burke delta | two write-safety behaviors (§5) + version readout + field-ACL policy + this doc |
 
 The `+burke.1` local-version suffix is the point of the version stamp: if
 `health_check` or `--version` reports a bare `1.3.0`, the machine is running
 **vanilla upstream from PyPI, not this build.** That distinction is the whole
 reason the suffix exists — check it first when something behaves unexpectedly.
+
+Note that upstream v1.3.0 exposes **no version at all** — no `--version` flag and
+no version field in `health_check`. Burke added both (`server_core.package_version()`,
+surfaced in `--version`, `--health`, and the `health_check` tool), because bumping
+the version number achieves nothing if no one can read it back. This is a Burke
+delta to re-audit on each upstream bump: if upstream later adds its own version
+readout, drop ours rather than carrying two.
 
 ### ⚠ Command-name collision — read before installing
 
@@ -152,13 +159,15 @@ registry-shape cases in `tests/test_plugins.py`.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`1.3.0+burke.1`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.1`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.1"`
 - [ ] In Claude, call `health_check` and confirm:
+  - [ ] `package_version` is `1.3.0+burke.1`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
   - [ ] `write_execution_enabled` matches what this machine is supposed to be
+  - [ ] `chatter_direct_enabled` is `false`
 - [ ] Confirm masking end to end: read `sale.order.line` asking for
       `["name","price_unit","margin","purchase_price"]`. Expect `margin` and
       `purchase_price` to come back under `redacted_fields`, not as values.

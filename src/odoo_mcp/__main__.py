@@ -15,6 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import build_auth
 from .server import mcp
+from .server_core import package_version
 
 SUPPORTED_MCP_TRANSPORTS = {"stdio", "streamable-http", "sse"}
 SECRET_ENV_KEYS = {"ODOO_PASSWORD", "ODOO_API_KEY", "MCP_HTTP_AUTH_TOKEN"}
@@ -158,6 +159,15 @@ def is_secret_env_key(key: str) -> bool:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command line arguments and environment defaults."""
     parser = argparse.ArgumentParser(description="Run the Odoo MCP server.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"odoo-mcp {package_version()}",
+        help=(
+            "Print the installed version and exit. Burke builds carry a "
+            "+burke.N suffix; a bare version means vanilla upstream."
+        ),
+    )
     parser.add_argument(
         "--transport",
         choices=sorted(SUPPORTED_MCP_TRANSPORTS),
@@ -306,6 +316,7 @@ def health_payload(args: argparse.Namespace) -> dict[str, object]:
         }
     return {
         "success": True,
+        "package_version": package_version(),
         "transport": args.transport,
         "host": args.host,
         "port": args.port,

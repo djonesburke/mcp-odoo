@@ -40,6 +40,23 @@ from .auth import auth_posture as oauth_posture
 from .field_policy import field_policy_posture, get_field_policy
 
 
+def package_version() -> str:
+    """Return the installed distribution version, or "unknown".
+
+    Burke builds carry a PEP 440 local-version suffix (``1.3.0+burke.1``) so an
+    operator can tell this build apart from vanilla upstream on PyPI. Nothing
+    else in the package exposes a version, so a bare ``1.3.0`` in health_check
+    means the machine is running upstream rather than the Burke build. Never
+    raises: a version readout must not be able to break health_check.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("odoo-mcp")
+    except Exception:  # PackageNotFoundError, or any metadata backend failure
+        return "unknown"
+
+
 def _srv() -> Any:
     """Late import of server module to resolve patchable symbols at call time."""
     from . import server
@@ -522,6 +539,7 @@ def runtime_security_report() -> Dict[str, Any]:
     security = runtime.get("transport_security")
     broad_unknown_enabled = truthy_env("ODOO_MCP_ALLOW_UNKNOWN_METHODS")
     return {
+        "package_version": package_version(),
         "transport": runtime.get("transport", os.environ.get("MCP_TRANSPORT", "stdio")),
         "host": runtime.get("host"),
         "port": runtime.get("port"),
