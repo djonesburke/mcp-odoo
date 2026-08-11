@@ -139,7 +139,8 @@ source:
 config:
   description: >-
     Configure the Odoo instance connection. ODOO_URL, ODOO_DB, ODOO_USERNAME,
-    and ODOO_PASSWORD are required. ODOO_TRANSPORT selects the RPC protocol
+    and one of ODOO_API_KEY or ODOO_PASSWORD are required. ODOO_TRANSPORT
+    selects the RPC protocol
     (xmlrpc for Odoo 14–18, json2 for Odoo 19+).
   secrets:
     - name: odoo-mcp.password

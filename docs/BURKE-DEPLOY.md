@@ -13,10 +13,10 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.2` |
+| Package version | `1.3.0+burke.3` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
-| Burke delta | two write-safety behaviors (§5) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + this doc |
+| Burke delta | two write-safety behaviors (§5) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + this doc |
 
 The `+burke.N` local-version suffix is the point of the version stamp: if
 `health_check` or `--version` reports a bare `1.3.0`, the machine is running
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.2`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.3`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -160,10 +160,10 @@ registry-shape cases in `tests/test_plugins.py`.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.2`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.2"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.3`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.3"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.2`
+  - [ ] `package_version` is `1.3.0+burke.3`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -218,7 +218,38 @@ Two things to know when using it:
 
 ---
 
-## 10. Upgrading to a newer upstream
+## 10. One credential slot per server, not two
+
+`ODOO_PASSWORD` is **optional when `ODOO_API_KEY` is set.** Upstream required
+both to be present before it would build an instance from environment
+variables, which forced every API-key deployment to store the same 40-character
+secret twice, under two names, in every config file. Six credential slots on one
+machine were four more than the deployment needed.
+
+The change is permissive and backward compatible: a config carrying both keeps
+working unchanged, so a machine can move to this build first and drop the
+duplicate afterwards, with no window where Odoo is unreachable. The two slots
+also fall back to each other in both directions — an Odoo API key authenticates
+over XML-RPC wherever a password does, so collapsing the slot does not depend on
+the transport.
+
+A partly-set environment now names the variables that are missing instead of
+reporting "no Odoo configuration found", which sent the reader hunting for a
+config file that was never the problem.
+
+**Per-user keys are the same string on prod and staging.** Staging is
+regenerated from a neutralized prod snapshot, and a key belongs to a `res.users`
+record rather than to an instance. So a machine with both connections holds one
+secret in two places by necessity — that is the floor, not redundancy to remove.
+It also means staging is a valid canary: it exercises the identical credential
+prod uses. Manage keys in prod only, and remember a config labelled `staging`
+that carries prod's database name reaches production and authenticates fine —
+`check_api_key_expiry`'s `instance_kind` and `database` fields are what catch
+that.
+
+---
+
+## 11. Upgrading to a newer upstream
 
 ```bash
 git fetch upstream --tags

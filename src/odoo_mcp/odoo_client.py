@@ -88,7 +88,8 @@ class OdooClient:
             url: Odoo server URL (with or without protocol)
             db: Database name
             username: Login username
-            password: Login password or API key for explicit JSON-2 usage
+            password: Login password or API key. May be empty when ``api_key``
+                is supplied; the two fall back to each other.
             timeout: Connection timeout in seconds
             verify_ssl: Whether to verify SSL certificates
             transport: Transport backend, either ``xmlrpc`` or ``json2``
@@ -107,10 +108,14 @@ class OdooClient:
         self.url = url
         self.db = db
         self.username = username
-        self.password = password
         self.uid: int | None = None
         self.transport = normalize_transport(transport)
+        # The two credential slots fall back to each other in both directions.
+        # An Odoo API key authenticates wherever a password does, including
+        # XML-RPC, so a deployment that holds only a key does not need to store
+        # it a second time under ODOO_PASSWORD to satisfy a shape check.
         self.api_key = api_key or (password if self.transport == "json2" else None)
+        self.password = password or api_key or ""
         self.json2_database_header = json2_database_header
         self.lang = (lang or "").strip() or None
 
@@ -757,16 +762,46 @@ INSTANCE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 LEGACY_ENV_VARS = ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_PASSWORD")
 
+#: Non-credential variables an environment-defined instance always needs.
+LEGACY_REQUIRED_ENV_VARS = ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME")
+
+#: Either of these satisfies the credential requirement. An Odoo API key is
+#: valid wherever a password is, so a deployment that authenticates with a key
+#: does not need to store it twice under two names.
+LEGACY_CREDENTIAL_ENV_VARS = ("ODOO_PASSWORD", "ODOO_API_KEY")
+
+
+def missing_legacy_env_vars() -> list[str]:
+    """Name what an environment-defined instance is missing, or return ``[]``.
+
+    Returns the missing non-credential variables, plus a single combined entry
+    when neither credential variable is set. Callers surface these names so a
+    partial environment produces "ODOO_DB is not set" rather than the far less
+    useful "no Odoo instances are configured".
+    """
+    missing = [var for var in LEGACY_REQUIRED_ENV_VARS if var not in os.environ]
+    if not any(var in os.environ for var in LEGACY_CREDENTIAL_ENV_VARS):
+        missing.append(" or ".join(LEGACY_CREDENTIAL_ENV_VARS))
+    return missing
+
 
 def _env_config() -> dict[str, Any] | None:
-    """Build a config entry from legacy environment variables, if complete."""
-    if not all(var in os.environ for var in LEGACY_ENV_VARS):
+    """Build a config entry from legacy environment variables, if complete.
+
+    ``ODOO_PASSWORD`` is optional when ``ODOO_API_KEY`` is set. Requiring both
+    forced every deployment that authenticates with an API key to store that
+    key twice, under two names, in every config file — which multiplies the
+    places a credential lives without adding a capability.
+    """
+    if any(var not in os.environ for var in LEGACY_REQUIRED_ENV_VARS):
+        return None
+    if not any(var in os.environ for var in LEGACY_CREDENTIAL_ENV_VARS):
         return None
     config: dict[str, Any] = {
         "url": os.environ["ODOO_URL"],
         "db": os.environ["ODOO_DB"],
         "username": os.environ["ODOO_USERNAME"],
-        "password": os.environ["ODOO_PASSWORD"],
+        "password": os.environ.get("ODOO_PASSWORD", ""),
     }
     if "ODOO_TRANSPORT" in os.environ:
         config["transport"] = os.environ["ODOO_TRANSPORT"]
@@ -871,9 +906,9 @@ def load_instances_config() -> tuple[str, dict[str, dict[str, Any]]]:
         if os.environ.get("ODOO_CONFIG_FILE"):
             print(
                 "Warning: ODOO_CONFIG_FILE is ignored because ODOO_URL/ODOO_DB/"
-                "ODOO_USERNAME/ODOO_PASSWORD are all set; the environment "
-                "defines a single 'default' instance. Unset them to use the "
-                "config file.",
+                "ODOO_USERNAME and a credential (ODOO_API_KEY or "
+                "ODOO_PASSWORD) are all set; the environment defines a single "
+                "'default' instance. Unset them to use the config file.",
                 file=sys.stderr,
             )
         return "default", {"default": env_config}
@@ -896,9 +931,20 @@ def load_instances_config() -> tuple[str, dict[str, dict[str, Any]]]:
             "default": _apply_legacy_env_overrides(cast(dict[str, Any], raw))
         }
 
+    # A partially-set environment is the common cause here, and reporting it as
+    # "no configuration found" sends the reader hunting for a missing file that
+    # was never the problem. Name the variables that are actually absent.
+    missing = missing_legacy_env_vars()
+    partial = len(missing) < len(LEGACY_REQUIRED_ENV_VARS) + 1
+    detail = (
+        f" Some Odoo environment variables are set but these are not: "
+        f"{', '.join(missing)}."
+        if missing and partial
+        else ""
+    )
     raise FileNotFoundError(
         "No Odoo configuration found. Please create an odoo_config.json file, "
-        "set ODOO_CONFIG_FILE, or set environment variables."
+        f"set ODOO_CONFIG_FILE, or set environment variables.{detail}"
     )
 
 

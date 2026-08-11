@@ -100,7 +100,7 @@ To let one MCP server talk to several Odoo instances, point the server at a mult
 
 Notes:
 
-- Do **not** set `ODOO_URL`/`ODOO_DB`/`ODOO_USERNAME`/`ODOO_PASSWORD` alongside the file — when all four are present, the environment wins and defines a single instance named `default`.
+- Do **not** set `ODOO_URL`/`ODOO_DB`/`ODOO_USERNAME` plus a credential (`ODOO_API_KEY` or `ODOO_PASSWORD`) alongside the file — when those are present, the environment wins and defines a single instance named `default`.
 - Tools accept an optional `instance` parameter (`search_records(model="res.partner", instance="globex")`); omitted → the `default` instance.
 - Two entries may point at the same `url`+`db` with different credentials to expose two accounts on one instance (e.g. an admin entry and a restricted bot entry).
 - Agents can discover what is configured with the `list_instances` tool — it returns names, URLs, databases, and transports, never credentials.

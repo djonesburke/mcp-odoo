@@ -594,3 +594,106 @@ def test_warns_when_odoo_config_file_is_ignored_by_env_vars(
     assert set(instances) == {"default"}
     captured = capsys.readouterr()
     assert "ODOO_CONFIG_FILE is ignored" in captured.err
+
+
+# --- ODOO_PASSWORD is optional when ODOO_API_KEY is set ------------------
+#
+# Requiring both forced every API-key deployment to store the same secret twice
+# under two names, in every config file. These tests pin the collapsed shape and
+# the backward compatibility that lets it be adopted without downtime.
+
+
+def test_env_config_builds_from_api_key_without_a_password(
+    monkeypatch, tmp_path, odoo_client_module
+):
+    clear_odoo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ODOO_URL", "https://odoo.example.test")
+    monkeypatch.setenv("ODOO_DB", "prod")
+    monkeypatch.setenv("ODOO_USERNAME", "api-user")
+    monkeypatch.setenv("ODOO_TRANSPORT", "json2")
+    monkeypatch.setenv("ODOO_API_KEY", "key-value")
+
+    assert odoo_client_module.load_config() == {
+        "url": "https://odoo.example.test",
+        "db": "prod",
+        "username": "api-user",
+        "password": "",
+        "transport": "json2",
+        "api_key": "key-value",
+    }
+
+
+def test_env_config_still_builds_from_a_password_alone(
+    monkeypatch, tmp_path, odoo_client_module
+):
+    """The pre-existing shape keeps working, so adoption needs no cutover."""
+    clear_odoo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ODOO_URL", "https://odoo.example.test")
+    monkeypatch.setenv("ODOO_DB", "prod")
+    monkeypatch.setenv("ODOO_USERNAME", "api-user")
+    monkeypatch.setenv("ODOO_PASSWORD", "secret")
+
+    assert odoo_client_module.load_config()["password"] == "secret"
+
+
+def test_env_config_ignored_when_no_credential_variable_is_set(
+    monkeypatch, tmp_path, odoo_client_module
+):
+    clear_odoo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ODOO_URL", "https://odoo.example.test")
+    monkeypatch.setenv("ODOO_DB", "prod")
+    monkeypatch.setenv("ODOO_USERNAME", "api-user")
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        odoo_client_module.load_instances_config()
+
+    assert "ODOO_PASSWORD or ODOO_API_KEY" in str(excinfo.value)
+
+
+def test_partial_environment_names_the_missing_variables(
+    monkeypatch, tmp_path, odoo_client_module
+):
+    """A half-set environment must not read as "no configuration found"."""
+    clear_odoo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ODOO_URL", "https://odoo.example.test")
+    monkeypatch.setenv("ODOO_API_KEY", "key-value")
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        odoo_client_module.load_instances_config()
+
+    message = str(excinfo.value)
+    assert "ODOO_DB" in message
+    assert "ODOO_USERNAME" in message
+    assert "ODOO_PASSWORD" not in message
+
+
+def test_empty_environment_does_not_claim_variables_are_missing(
+    monkeypatch, tmp_path, odoo_client_module
+):
+    clear_odoo_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        odoo_client_module.load_instances_config()
+
+    assert "are set but these are not" not in str(excinfo.value)
+
+
+def test_missing_legacy_env_vars_reports_the_credential_pair_once(
+    monkeypatch, odoo_client_module
+):
+    clear_odoo_env(monkeypatch)
+    monkeypatch.setenv("ODOO_URL", "https://odoo.example.test")
+    monkeypatch.setenv("ODOO_DB", "prod")
+    monkeypatch.setenv("ODOO_USERNAME", "api-user")
+
+    assert odoo_client_module.missing_legacy_env_vars() == [
+        "ODOO_PASSWORD or ODOO_API_KEY"
+    ]
+
+    monkeypatch.setenv("ODOO_API_KEY", "key-value")
+    assert odoo_client_module.missing_legacy_env_vars() == []

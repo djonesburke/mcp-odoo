@@ -36,10 +36,10 @@ Rules:
 - Each entry is **self-contained** — credentials and transport never
   inherit from another entry. Global env vars only act as fallback
   defaults for `timeout`/`verify_ssl` style keys.
-- If all four legacy env vars (`ODOO_URL`/`ODOO_DB`/`ODOO_USERNAME`/
-  `ODOO_PASSWORD`) are set, they win and define a single `default`
-  instance; a warning is printed when a config file is ignored because of
-  this.
+- If the legacy env vars (`ODOO_URL`/`ODOO_DB`/`ODOO_USERNAME` plus either
+  `ODOO_API_KEY` or `ODOO_PASSWORD`) are set, they win and define a single
+  `default` instance; a warning is printed when a config file is ignored
+  because of this.
 - See `odoo_config.multi.json.example` for a copyable template.
 
 ## Routing

@@ -1308,3 +1308,89 @@ def test_redirect_transport_request_decodes_bytes_location_header(
         odoo_client_module.xmlrpc.client.Transport, "request", fake_request
     )
     assert transport.request("odoo.example.test", "/start", b"<body/>") == {"ok": True}
+
+
+# --- credential slots fall back to each other in both directions ---------
+
+
+def test_xmlrpc_uses_the_api_key_as_the_password_when_none_is_set(
+    monkeypatch, odoo_client_module
+):
+    """An Odoo API key authenticates over XML-RPC wherever a password does.
+
+    Without this, a config that holds only ODOO_API_KEY would authenticate on
+    JSON-2 and fail on XML-RPC, so collapsing the duplicate slot would depend
+    on the transport.
+    """
+    calls = []
+
+    def fake_server_proxy(endpoint, transport, allow_none=False):
+        if endpoint.endswith("/xmlrpc/2/common"):
+            return FakeCommonProxy(calls)
+        if endpoint.endswith("/xmlrpc/2/object"):
+            return FakeObjectProxy(calls)
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(
+        odoo_client_module.xmlrpc.client, "ServerProxy", fake_server_proxy
+    )
+    client = odoo_client_module.OdooClient(
+        url="odoo.example.test",
+        db="demo-db",
+        username="demo-user",
+        password="",
+        transport="xmlrpc",
+        api_key="key-value",
+    )
+
+    assert client.password == "key-value"
+    authenticate = next(call for call in calls if call[0] == "authenticate")
+    assert authenticate[3] == "key-value"
+
+
+def test_json2_still_accepts_a_password_holding_an_api_key(
+    monkeypatch, odoo_client_module
+):
+    """The pre-existing one-slot-under-the-wrong-name shape keeps working."""
+
+    def fake_urlopen(request, timeout=None, context=None):
+        return FakeJsonResponse({"ok": True})
+
+    monkeypatch.setattr(odoo_client_module.urllib.request, "urlopen", fake_urlopen)
+    client = odoo_client_module.OdooClient(
+        url="https://odoo.example.test",
+        db="demo-db",
+        username="demo-user",
+        password="key-in-password-slot",
+        transport="json2",
+    )
+
+    assert client.api_key == "key-in-password-slot"
+
+
+def test_explicit_password_is_not_overridden_by_an_api_key(
+    monkeypatch, odoo_client_module
+):
+    calls = []
+
+    def fake_server_proxy(endpoint, transport, allow_none=False):
+        if endpoint.endswith("/xmlrpc/2/common"):
+            return FakeCommonProxy(calls)
+        if endpoint.endswith("/xmlrpc/2/object"):
+            return FakeObjectProxy(calls)
+        raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    monkeypatch.setattr(
+        odoo_client_module.xmlrpc.client, "ServerProxy", fake_server_proxy
+    )
+    client = odoo_client_module.OdooClient(
+        url="odoo.example.test",
+        db="demo-db",
+        username="demo-user",
+        password="real-password",
+        transport="xmlrpc",
+        api_key="key-value",
+    )
+
+    assert client.password == "real-password"
+    assert client.api_key == "key-value"

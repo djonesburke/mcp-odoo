@@ -15,7 +15,9 @@ shape/transport problems.
 
 ### `authentication`
 The credential itself was rejected before any model-level check.
-- Verify `ODOO_URL` / `ODOO_DB` / `ODOO_USERNAME` / `ODOO_PASSWORD`.
+- Verify `ODOO_URL` / `ODOO_DB` / `ODOO_USERNAME` and one of `ODOO_API_KEY` /
+  `ODOO_PASSWORD`. A partly-set environment names the missing variables in the
+  startup error rather than reporting no configuration at all.
 - Odoo Online (SaaS) requires an API key, not the login password.
 - Run `odoo-mcp --health`, then the `health_check` tool.
 
