@@ -14,6 +14,7 @@
     "default": {
       "res.partner": { "deny": ["credit_limit", "comment"] },
       "hr.employee": { "allow": ["name", "work_email", "department_id", "job_id"] },
+      "res.users.apikeys": { "allow": ["name", "user_id", "scope", "create_date", "expiration_date"] },
       "*": { "deny": ["message_ids"] }
     }
   }

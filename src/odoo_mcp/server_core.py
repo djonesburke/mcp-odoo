@@ -43,7 +43,7 @@ from .field_policy import field_policy_posture, get_field_policy
 def package_version() -> str:
     """Return the installed distribution version, or "unknown".
 
-    Burke builds carry a PEP 440 local-version suffix (``1.3.0+burke.1``) so an
+    Burke builds carry a PEP 440 local-version suffix (``1.3.0+burke.N``) so an
     operator can tell this build apart from vanilla upstream on PyPI. Nothing
     else in the package exposes a version, so a bare ``1.3.0`` in health_check
     means the machine is running upstream rather than the Burke build. Never

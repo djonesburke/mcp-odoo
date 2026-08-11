@@ -127,7 +127,7 @@ meta:
 about:
   title: Odoo MCP
   description: >-
-    Safe, approval-gated MCP bridge for Odoo ERP (local/self-host). 41 tools:
+    Safe, approval-gated MCP bridge for Odoo ERP (local/self-host). 42 tools:
     search, read, schema discovery, access diagnostics, chatter, gated writes,
     multi-instance fan-out. XML-RPC (16–18) and JSON-2 (19+). Free hosted
     product from the same author: ERPipe at https://mcp.erpipe.com/

@@ -117,6 +117,7 @@ from .tools_diagnostics import (
     analyze_upgrade_log,
     build_domain,
     business_pack_report,
+    check_api_key_expiry,
     diagnose_access,
     diagnose_odoo_call,
     fit_gap_report,
@@ -302,6 +303,7 @@ __all__ = [
     "analyze_upgrade_log",
     "build_domain",
     "business_pack_report",
+    "check_api_key_expiry",
     # Knowledge tools
     "index_knowledge",
     "search_knowledge",

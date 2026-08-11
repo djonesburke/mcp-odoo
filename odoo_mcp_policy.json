@@ -1,7 +1,7 @@
 {
   "comment": "Burke Truck & Equipment — reviewed side-effect methods for execute_method. Change only via PR.",
   "allowed_side_effect_methods": [],
-  "field_acl_comment": "Read-path field ACL. Per instance ('default' = default instance), per model, exactly one of 'deny' (blacklist) or 'allow' (exclusive whitelist). '*' is a per-instance model wildcard. hr.employee uses 'allow' deliberately: an exclusive whitelist is strictly stricter than enumerating PII to deny, and it stays safe when Odoo adds new sensitive fields on upgrade. hr.version (Odoo 19 contract/wage model) keeps an explicit deny list because it has no small readable subset. Change only via PR.",
+  "field_acl_comment": "Read-path field ACL. Per instance ('default' = default instance), per model, exactly one of 'deny' (blacklist) or 'allow' (exclusive whitelist). '*' is a per-instance model wildcard. hr.employee uses 'allow' deliberately: an exclusive whitelist is strictly stricter than enumerating PII to deny, and it stays safe when Odoo adds new sensitive fields on upgrade. hr.version (Odoo 19 contract/wage model) keeps an explicit deny list because it has no small readable subset. res.users.apikeys uses 'allow' for the same upgrade-safety reason: Odoo 19 exposes no key or key-prefix field on that model, so this closes no present hole, but it guarantees a future Odoo that adds one cannot surface it through search_records, the knowledge indexer, or odoo:// resources. Change only via PR.",
   "field_acl": {
     "default": {
       "*": {
@@ -49,6 +49,15 @@
           "additional_note",
           "wage",
           "contract_wage"
+        ]
+      },
+      "res.users.apikeys": {
+        "allow": [
+          "name",
+          "user_id",
+          "scope",
+          "create_date",
+          "expiration_date"
         ]
       },
       "res.partner": {

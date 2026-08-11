@@ -6,6 +6,7 @@ diagnose_access, upgrade_risk_report, lookup_model_history, fit_gap_report,
 scan_addons_source, build_domain, business_pack_report.
 """
 
+from datetime import datetime, timezone
 from typing import Annotated, Any, Dict, List, Optional
 
 from mcp.server.mcpserver import Context
@@ -27,6 +28,16 @@ from .agent_tools import (
     business_pack_report as build_business_pack_report,
     lookup_model_history_report,
     scan_addons_source_report,
+)
+from .credential_lifecycle import (
+    APIKEY_FIELDS,
+    APIKEY_MODEL,
+    DEFAULT_WARN_DAYS,
+    NEUTRALIZED_PARAMETER,
+    assert_projection_safe,
+    build_expiry_report,
+    clamp_warn_days,
+    classify_instance_kind,
 )
 from .diagnostics import (
     analyze_upgrade_log_report,
@@ -725,3 +736,101 @@ def business_pack_report(
         )
     except Exception as e:
         return {"success": False, "tool": "business_pack_report", "error": str(e)}
+
+
+@mcp.tool(
+    description="Report Odoo API key expiry status without reading key material",
+    annotations=READ_ONLY_TOOL,
+    structured_output=True,
+)
+def check_api_key_expiry(
+    ctx: Context,
+    warn_days: Annotated[
+        int,
+        Field(
+            description="Days before expiration to start warning; clamped to 0-365."
+        ),
+    ] = DEFAULT_WARN_DAYS,
+    instance: Annotated[
+        Optional[str],
+        Field(description="Optional configured Odoo instance name; uses the default if omitted."),
+    ] = None,
+) -> Dict[str, Any]:
+    """
+    Report which Odoo API keys are expired or expiring, and on which instance.
+
+    Odoo never warns before a key expires, and an expired key surfaces
+    downstream as an empty result rather than an error. Run this to get a
+    dated answer instead of silence.
+
+    Read-only, no side effects. It reads a fixed six-field projection of
+    ``res.users.apikeys`` — a model that exposes no key or key-prefix field
+    through the ORM — so no key material is read, returned, or logged.
+
+    Three results are findings rather than passes: a key with no expiration
+    date, an expiration date that cannot be parsed, and zero visible keys.
+    Because Odoo restricts non-system users to their own key records, the
+    response states whether it could see beyond the calling user.
+    """
+    try:
+        assert_projection_safe()
+        window = clamp_warn_days(warn_days)
+        instance_name, odoo = _resolve_odoo(ctx, instance)
+
+        neutralized_rows, probe_error = _safe_odoo_read(
+            NEUTRALIZED_PARAMETER,
+            lambda: odoo.execute_method(
+                "ir.config_parameter",
+                "search_read",
+                [["key", "=", NEUTRALIZED_PARAMETER]],
+                fields=["key", "value"],
+                limit=1,
+            ),
+        )
+        instance_kind, instance_kind_detail = classify_instance_kind(
+            neutralized_rows, probe_error
+        )
+
+        caller_uid = getattr(odoo, "uid", None)
+        if caller_uid is None:
+            user_context, _ = _safe_odoo_read(
+                "res.users.context_get",
+                lambda: odoo.get_user_context(),
+            )
+            if isinstance(user_context, dict) and not user_context.get("error"):
+                raw_uid = user_context.get("uid")
+                caller_uid = raw_uid if isinstance(raw_uid, int) else None
+
+        records = odoo.execute_method(
+            APIKEY_MODEL,
+            "search_read",
+            [],
+            fields=list(APIKEY_FIELDS),
+            limit=clamp_limit(200, maximum=500),
+        )
+        if not isinstance(records, list):
+            records = []
+
+        report = build_expiry_report(
+            records,
+            now=datetime.now(timezone.utc),
+            warn_days=window,
+            caller_uid=caller_uid if isinstance(caller_uid, int) else None,
+            instance=instance_name,
+            database=getattr(odoo, "db", None),
+            instance_kind=instance_kind,
+            instance_kind_detail=instance_kind_detail,
+        )
+        if probe_error is not None:
+            report["metadata_errors"] = [probe_error]
+        return {
+            "success": True,
+            "tool": "check_api_key_expiry",
+            **report,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "tool": "check_api_key_expiry",
+            "error": sanitize_odoo_error(str(e)),
+        }

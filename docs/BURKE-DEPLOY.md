@@ -13,12 +13,12 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.1` |
+| Package version | `1.3.0+burke.2` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
-| Burke delta | two write-safety behaviors (§5) + version readout + field-ACL policy + this doc |
+| Burke delta | two write-safety behaviors (§5) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + this doc |
 
-The `+burke.1` local-version suffix is the point of the version stamp: if
+The `+burke.N` local-version suffix is the point of the version stamp: if
 `health_check` or `--version` reports a bare `1.3.0`, the machine is running
 **vanilla upstream from PyPI, not this build.** That distinction is the whole
 reason the suffix exists — check it first when something behaves unexpectedly.
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.1`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.2`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -111,6 +111,7 @@ drift apart between installs.
 | `ODOO_MCP_ENABLE_WRITES` | omit, or `1` | Omit for a read-only machine. Setting `1` enables `execute_approved_write` **and** `chatter_post`. |
 | `ODOO_MCP_AUDIT_LOG` | absolute path | Per-call audit trail. Ends in `.jsonl`, which is gitignored — keep it outside any repo. |
 | `MCP_CHATTER_DIRECT` | **omit** | Setting `1` lets `chatter_post` skip its approval token. Do not set it. |
+| `ODOO_MCP_ROTATION_DOC` | runbook path | Echoed by `check_api_key_expiry` so an expiry alert names its own remedy (§9). Not a credential. |
 
 Do **not** point a server at a live git working copy (`uv run --directory ...`).
 A checkout can be moved or switched between branches by unrelated work, silently
@@ -159,10 +160,10 @@ registry-shape cases in `tests/test_plugins.py`.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.1`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.1"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.2`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.2"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.1`
+  - [ ] `package_version` is `1.3.0+burke.2`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -173,6 +174,10 @@ Run on each machine after setup. No live Odoo write is performed.
       `purchase_price` to come back under `redacted_fields`, not as values.
 - [ ] Confirm the audit log path is being written and is **outside** any git repo
 - [ ] Confirm `MCP_CHATTER_DIRECT` is not set
+- [ ] Call `check_api_key_expiry` and confirm `instance_kind` matches the label on
+      the connection, `database` is the database you expect, and `status` is not
+      `expired`. Note `visibility`: `own_user_only` means this report does **not**
+      cover anyone else's keys (§9).
 
 If `field_acl.active` is `false`, stop and fix it before letting anyone use the
 machine. Every other control assumes the ACL is on.
@@ -192,7 +197,28 @@ are the enforcement layer.
 
 ---
 
-## 8. Upgrading to a newer upstream
+## 9. API key expiry monitoring
+
+Odoo never warns before an API key expires, and an expired key surfaces
+downstream as an **empty result**, not an error. `check_api_key_expiry` is the
+Burke addition that makes that state legible: read-only, a fixed six-field
+projection of `res.users.apikeys`, and no key material read or returned. Full
+behavior in [credential-lifecycle.md](credential-lifecycle.md).
+
+Two things to know when using it:
+
+- **It reports what *this credential* can see.** Odoo restricts non-system users
+  to their own key records, so `visibility: own_user_only` means other users'
+  keys are not covered. A clean report from one machine is not an estate-wide
+  all-clear.
+- **A tool nobody calls prevents nothing.** The server has no timer. Until a
+  scheduled job calls this daily and surfaces a non-`ok` status, the fallback is
+  a calendar reminder two weeks before the known expiry — that reminder stays
+  mandatory, not optional.
+
+---
+
+## 10. Upgrading to a newer upstream
 
 ```bash
 git fetch upstream --tags

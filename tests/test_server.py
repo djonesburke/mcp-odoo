@@ -169,9 +169,10 @@ def test_server_registers_expected_tools_and_resources_without_lifespan():
         "search_across_instances",
         "aggregate_across_instances",
         "accounting_health_across_instances",
+        "check_api_key_expiry",
     }
     assert expected_tools <= tools
-    assert len(tools) == 41
+    assert len(tools) == 42
     assert "odoo://models" in resources
     assert {
         "odoo://model/{model_name}",
@@ -878,7 +879,7 @@ def test_profile_health_and_prompts_are_available():
 
     health = call_tool_json(server, "health_check", {})
     assert health["success"] is True
-    assert health["server"]["tool_count"] == 41
+    assert health["server"]["tool_count"] == 42
     assert health["runtime"]["chatter_direct_enabled"] is False
     assert health["runtime"]["broad_unknown_method_mode"]["enabled"] is False
 
@@ -1066,6 +1067,196 @@ def test_diagnose_access_survives_record_rule_read_failure():
     assert report["access"]["granting_count"] == 1
     assert report["metadata_errors"][0]["stage"] == "ir.rule"
     assert "metadata_access_unavailable" in codes
+
+
+# ----- API key expiry monitor -----
+
+
+class ApiKeyClient:
+    """Client stub for check_api_key_expiry.
+
+    Carries no credential-shaped values: res.users.apikeys exposes no key or
+    key-prefix field, so there is nothing of that kind to simulate.
+    """
+
+    uid = 6
+    db = "production19.example.com"
+
+    def __init__(
+        self,
+        *,
+        keys=None,
+        neutralized=None,
+        fail_probe=False,
+        fail_keys=False,
+        uid=6,
+    ):
+        self.uid = uid
+        self.neutralized = neutralized
+        self.fail_probe = fail_probe
+        self.fail_keys = fail_keys
+        self.calls = []
+        self.keys = (
+            keys
+            if keys is not None
+            else [
+                {
+                    "id": 12,
+                    "name": "Claude Code MCP",
+                    "user_id": [6, "Dalton Jones"],
+                    "scope": False,
+                    "create_date": "2026-07-22 15:04:11",
+                    "expiration_date": "2099-01-01 00:00:00",
+                }
+            ]
+        )
+
+    def get_user_context(self):
+        return {"lang": "en_US", "uid": self.uid}
+
+    def execute_method(self, model, method, *args, **kwargs):
+        self.calls.append((model, method, kwargs.get("fields")))
+        if model == "ir.config_parameter" and method == "search_read":
+            if self.fail_probe:
+                raise ValueError("Access denied reading ir.config_parameter")
+            if self.neutralized is None:
+                return []
+            return [
+                {"key": "database.is_neutralized", "value": self.neutralized}
+            ]
+        if model == "res.users.apikeys" and method == "search_read":
+            if self.fail_keys:
+                raise ValueError("Odoo Session Expired")
+            return self.keys
+        raise AssertionError(f"unexpected call {model}.{method}")
+
+
+def test_check_api_key_expiry_reads_only_the_fixed_projection():
+    server = importlib.import_module("odoo_mcp.server")
+    client = ApiKeyClient()
+
+    report = server.check_api_key_expiry(FakeCtx(client))
+
+    assert report["success"] is True
+    assert report["tool"] == "check_api_key_expiry"
+    key_call = next(
+        call for call in client.calls if call[0] == "res.users.apikeys"
+    )
+    assert key_call[2] == [
+        "id",
+        "name",
+        "user_id",
+        "scope",
+        "create_date",
+        "expiration_date",
+    ]
+    assert "key" not in key_call[2]
+    assert "index" not in key_call[2]
+
+
+def test_check_api_key_expiry_reports_instance_and_database():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(FakeCtx(ApiKeyClient()))
+
+    assert report["instance"] == "default"
+    assert report["database"] == "production19.example.com"
+    assert report["instance_kind"] == "production"
+    assert report["caller_uid"] == 6
+    assert report["visibility"] == "own_user_only"
+
+
+def test_check_api_key_expiry_flags_a_neutralized_instance_as_staging():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(
+        FakeCtx(ApiKeyClient(neutralized="True"))
+    )
+
+    assert report["instance_kind"] == "staging"
+
+
+def test_check_api_key_expiry_does_not_call_an_unreadable_probe_production():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(FakeCtx(ApiKeyClient(fail_probe=True)))
+
+    assert report["success"] is True
+    assert report["instance_kind"] == "unknown"
+    assert report["metadata_errors"][0]["stage"] == "database.is_neutralized"
+
+
+def test_check_api_key_expiry_surfaces_an_expiring_key():
+    server = importlib.import_module("odoo_mcp.server")
+    client = ApiKeyClient(
+        keys=[
+            {
+                "id": 12,
+                "name": "Claude Code MCP",
+                "user_id": [6, "Dalton Jones"],
+                "scope": False,
+                "create_date": "2026-07-22 15:04:11",
+                "expiration_date": "2000-01-01 00:00:00",
+            }
+        ]
+    )
+
+    report = server.check_api_key_expiry(FakeCtx(client))
+
+    assert report["status"] == "expired"
+    assert report["actions"]
+
+
+def test_check_api_key_expiry_never_reports_zero_keys_as_healthy():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(FakeCtx(ApiKeyClient(keys=[])))
+
+    assert report["success"] is True
+    assert report["status"] == "no_keys_visible"
+    assert "NOT an all-clear" in report["summary"]
+
+
+def test_check_api_key_expiry_clamps_the_warning_window():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(FakeCtx(ApiKeyClient()), warn_days=9999)
+
+    assert report["warn_days"] == 365
+
+
+def test_check_api_key_expiry_falls_back_to_the_user_context_for_uid():
+    server = importlib.import_module("odoo_mcp.server")
+
+    class NoUidClient(ApiKeyClient):
+        uid = None
+
+    report = server.check_api_key_expiry(FakeCtx(NoUidClient(uid=None)))
+
+    assert report["caller_uid"] is None
+    assert report["visibility"] == "unknown"
+
+
+def test_check_api_key_expiry_returns_a_sanitized_error_envelope():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(FakeCtx(ApiKeyClient(fail_keys=True)))
+
+    assert report["success"] is False
+    assert report["tool"] == "check_api_key_expiry"
+    assert report["error"]["debug"] == "[redacted]"
+    assert "Session Expired" in report["error"]["message"]
+
+
+def test_check_api_key_expiry_rejects_an_unknown_instance():
+    server = importlib.import_module("odoo_mcp.server")
+
+    report = server.check_api_key_expiry(
+        FakeCtx(ApiKeyClient()), instance="nope"
+    )
+
+    assert report["success"] is False
+    assert "nope" in report["error"]["message"]
 
 
 # ----- Smart field selection (Phase 1.1) -----
@@ -1900,7 +2091,7 @@ def test_max_smart_fields_invalid_env_falls_back_to_default(monkeypatch):
 def test_mcp_surface_counts_reports_v030_totals():
     server = importlib.import_module("odoo_mcp.server")
     counts = server.mcp_surface_counts()
-    assert counts["tool_count"] == 41
+    assert counts["tool_count"] == 42
     assert counts["prompt_count"] == 11
     # 1 fixed resource + 3 templates = 4
     assert counts["resource_count"] == 4

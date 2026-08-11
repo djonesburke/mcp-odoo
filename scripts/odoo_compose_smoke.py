@@ -775,6 +775,7 @@ def assert_tool_surface(tool_names: set[str]) -> None:
         "list_instances",
         "lookup_model_history",
         "read_attachment",
+        "check_api_key_expiry",
     }
     if not expected_tools <= tool_names:
         raise AssertionError(f"Missing MCP tools: {expected_tools - tool_names}")
@@ -1087,8 +1088,8 @@ async def mcp_stdio_smoke(
                 await session.call_tool("health_check", arguments={}),
                 "health_check",
             )
-            if health.get("server", {}).get("tool_count") != 41:
-                raise AssertionError(f"health_check did not report 41 tools: {health}")
+            if health.get("server", {}).get("tool_count") != 42:
+                raise AssertionError(f"health_check did not report 42 tools: {health}")
             if "chatter_direct_enabled" not in health.get("runtime", {}):
                 raise AssertionError(
                     f"health_check did not surface chatter_direct posture: {health}"

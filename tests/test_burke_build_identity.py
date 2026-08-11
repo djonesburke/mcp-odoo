@@ -1,6 +1,6 @@
 """The build must be able to identify itself.
 
-Burke ships this fork with a PEP 440 local-version suffix (``1.3.0+burke.1``).
+Burke ships this fork with a PEP 440 local-version suffix (``1.3.0+burke.N``).
 Nothing else in the package exposes a version, so without these readouts there
 is no way to tell whether a machine is running the Burke build or vanilla
 upstream from PyPI when something misbehaves. That question comes up first in

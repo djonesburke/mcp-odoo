@@ -77,7 +77,7 @@ A complete runnable example lives in
 ## Trimming the tool surface
 
 Independent of plugins, deployments can cut the tool list per client
-(useful when a small agent drowns in 41 tools):
+(useful when a small agent drowns in 42 tools):
 
 ```bash
 # keep only the read basics
