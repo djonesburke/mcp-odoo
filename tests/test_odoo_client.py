@@ -1040,28 +1040,44 @@ def test_get_model_fields_handles_execute_failure(monkeypatch, odoo_client_modul
     assert "rpc" in result["error"]
 
 
-def test_search_read_handles_execute_failure_returns_empty_list(
+def test_search_read_raises_rather_than_returning_an_empty_list(
     monkeypatch, odoo_client_module
 ):
+    """A failed search must never be indistinguishable from a search that
+    matched nothing.
+
+    This previously returned []. Verified against production 2026-08-13: one
+    invalid field name in ``fields`` made search_records answer
+    ``success: true, count: 0, error: null`` on any model - a wrong answer
+    delivered confidently, which is the failure mode this server exists to
+    remove rather than produce.
+    """
     client, _ = build_client(monkeypatch, odoo_client_module)
 
     def boom(*args):
         raise RuntimeError("rpc")
 
     client._models.execute_kw = boom  # type: ignore[attr-defined]
-    assert client.search_read("res.partner", [], offset=1) == []
+    with pytest.raises(RuntimeError, match="rpc"):
+        client.search_read("res.partner", [], offset=1)
 
 
-def test_read_records_handles_execute_failure_returns_empty_list(
+def test_read_records_raises_rather_than_returning_an_empty_list(
     monkeypatch, odoo_client_module
 ):
+    """Same contract on the by-id read path.
+
+    The empty list was worse here: read_record renders it as "Record not
+    found: <model> ID <n>", naming a record that exists.
+    """
     client, _ = build_client(monkeypatch, odoo_client_module)
 
     def boom(*args):
         raise RuntimeError("rpc")
 
     client._models.execute_kw = boom  # type: ignore[attr-defined]
-    assert client.read_records("res.partner", [1]) == []
+    with pytest.raises(RuntimeError, match="rpc"):
+        client.read_records("res.partner", [1])
 
 
 def test_json2_get_server_version_falls_back_to_web_version_on_error(

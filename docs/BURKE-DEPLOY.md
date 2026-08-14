@@ -13,10 +13,10 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.4` |
+| Package version | `1.3.0+burke.5` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
-| Burke delta | five write-safety behaviors (§5) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + this doc |
+| Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + this doc |
 
 The `+burke.N` local-version suffix is the point of the version stamp: if
 `health_check` or `--version` reports a bare `1.3.0`, the machine is running
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.4`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.5`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -236,7 +236,7 @@ Run on each machine after setup. No live Odoo write is performed.
 - [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.3`** (a bare `1.3.0` is the wrong build)
 - [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.3"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.4`
+  - [ ] `package_version` is `1.3.0+burke.5`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -276,6 +276,59 @@ Closing this properly needs a restricted Odoo user rather than admin
 credentials, or not exposing raw search to the team. Read-only tool configs and
 skill defaults are conveniences, not security boundaries — Odoo per-user ACLs
 are the enforcement layer.
+
+---
+
+## 8. A failed read is never served as "no data"
+
+Upstream `OdooClient.search_read` and `read_records` both ended in:
+
+```python
+except Exception as e:
+    print(f"Error in search_read: {str(e)}", file=sys.stderr)
+    return []
+```
+
+Every Odoo-side failure on the two most-used read paths became an empty list.
+The message went to stderr, which in a Claude Desktop extension nobody ever
+sees. The caller could not distinguish **"nothing matched"** from **"your query
+was invalid"**, **"your key expired"**, or **"the server returned 500"**.
+
+Reproduced against Burke production on 2026-08-13, read-only:
+
+| Call | Result |
+|---|---|
+| `res.partner`, `fields=["id","name"]` | records returned |
+| `res.partner`, `fields=["id","name","totally_bogus_field_xyz"]` | `success: true`, `count: 0`, `error: null` |
+
+`res.groups.full_name` no longer exists in Odoo 19, so an ordinary request
+answered "there are no such records" about records that were sitting there.
+
+**Why this outranks most of the write-path work for a read-only deployment.**
+An error is recoverable — the reader retries. A confident empty answer is not:
+it gets believed. Anyone reaching Odoo by describing what they want in English
+will guess field names, and every miss would read as a fact about the business.
+This is also the mechanism behind the symptom
+[credential-lifecycle.md](credential-lifecycle.md) documents — an expired key
+surfacing as an empty result rather than an error.
+
+Both methods now re-raise. Every call site already wrapped them in a structured
+error envelope, so the error reaches the user as `success: false` with the Odoo
+message. `read_record` in particular stops reporting "Record not found" for a
+record that exists.
+
+The stderr line is kept: an operator tailing logs still gets it, and it is now
+accompanied by a real error rather than replacing one.
+
+Covered by `tests/test_read_error_surfacing.py`, which also pins the other
+direction — a genuinely empty search still returns `success: true, count: 0`,
+and a genuinely missing id still returns "Record not found". A fix that traded
+a false negative for a false alarm would be no better than the bug.
+
+**Still swallowed, deliberately:** `get_installed_modules` returns `[]` on
+failure (metadata for `get_odoo_profile`; a profile call should degrade rather
+than fail outright). Every other error path in `odoo_client.py` already returns
+`{"error": ...}` and always did.
 
 ---
 

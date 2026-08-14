@@ -603,6 +603,11 @@ class OdooClient:
         Returns:
             List of dictionaries with the matching records
 
+        Raises:
+            Exception: whatever the transport raised. A failed search is never
+                returned as an empty list — callers must be able to tell "no
+                matches" from "the query was invalid".
+
         Examples:
             >>> client = OdooClient(url, db, username, password)
             >>> records = client.search_read('res.partner', [('is_company', '=', True)], limit=5)
@@ -623,8 +628,15 @@ class OdooClient:
             result = self._execute(model_name, "search_read", domain, **kwargs)
             return cast(list[dict[str, Any]], result)
         except Exception as e:
+            # Never render an Odoo failure as an empty result. An invalid field
+            # name, an expired API key and a search that genuinely matched
+            # nothing all used to return [], and no caller could tell them
+            # apart — so a mistyped field read as "there is no such data", which
+            # is a wrong answer delivered confidently rather than an error.
+            # Every caller wraps this in a structured error envelope; let it
+            # reach them.
             print(f"Error in search_read: {str(e)}", file=sys.stderr)
-            return []
+            raise
 
     def read_records(
         self, model_name: str, ids: list[int], fields: list[str] | None = None
@@ -640,6 +652,11 @@ class OdooClient:
         Returns:
             List of dictionaries with the requested records
 
+        Raises:
+            Exception: whatever the transport raised. A failed read is never
+                returned as an empty list — that reaches the caller as
+                "record not found" for a record that exists.
+
         Examples:
             >>> client = OdooClient(url, db, username, password)
             >>> records = client.read_records('res.partner', [1])
@@ -654,8 +671,11 @@ class OdooClient:
             result = self._execute(model_name, "read", ids, **kwargs)
             return cast(list[dict[str, Any]], result)
         except Exception as e:
+            # Same reasoning as search_read above. Here the lie was worse: an
+            # empty list reaches read_record as "Record not found: <model> ID
+            # <n>", naming a record that exists perfectly well.
             print(f"Error reading records: {str(e)}", file=sys.stderr)
-            return []
+            raise
 
 
 class RedirectTransport(xmlrpc.client.Transport):
