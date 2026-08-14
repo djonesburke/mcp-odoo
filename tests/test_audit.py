@@ -216,7 +216,13 @@ def test_elicitation_accept_proceeds_to_gates(monkeypatch):
     assert len(ctx.elicited_messages) == 1
 
 
-def test_elicitation_unsupported_client_falls_back(monkeypatch):
+def test_elicitation_unsupported_client_is_refused_not_fallen_back(monkeypatch):
+    """Burke behavior 3: an unaskable client fails the write, not the gate.
+
+    Upstream fell back to the token flow here. Every gate in that flow is one
+    the calling agent satisfies by itself, so "confirm every write" quietly
+    became "write freely" on any client that could not prompt.
+    """
     import importlib
 
     server = importlib.import_module("odoo_mcp.server")
@@ -228,9 +234,11 @@ def test_elicitation_unsupported_client_falls_back(monkeypatch):
             ctx, {"model": "res.partner", "operation": "write", "token": "bogus"}
         )
     )
-    # Fallback: behaves exactly like the token flow.
     assert result["success"] is False
-    assert "token" in result["error"]
+    # Refused for the stated reason, and never reached the token gate.
+    assert server.ELICIT_WRITES_ENV in result["error"]
+    assert "no human could be asked" in result["error"]
+    assert "token" not in result["error"]
 
 
 def test_execute_approved_write_denial_is_audited(monkeypatch, tmp_path):

@@ -310,6 +310,7 @@ def register_write_approval(
     app_context: AppContext,
     report: Dict[str, Any],
     resolved_binary_values: Optional[Dict[str, str]] = None,
+    current_state: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Persist validated write approvals inside the current server lifespan.
 
@@ -317,6 +318,11 @@ def register_write_approval(
     stored only in this server-side record — never in ``report["approval"]``,
     which is what gets echoed back to the caller and hashed into the approval
     token. See ``_resolve_binary_from_path_fields`` in ``tools_write.py``.
+
+    ``current_state`` (the pre-write snapshot rendered into the human
+    confirmation prompt) is held here for the same reason: it must reach
+    ``execute_approved_write`` without entering the canonical payload, or the
+    approval token would change whenever Odoo data changed.
     """
     approval = report.get("approval")
     if not report.get("success") or not isinstance(approval, dict):
@@ -334,6 +340,8 @@ def register_write_approval(
     }
     if resolved_binary_values:
         record["resolved_binary_values"] = dict(resolved_binary_values)
+    if current_state is not None:
+        record["current_state"] = dict(current_state)
     app_context.write_approvals[token] = record
     approval["validated_at"] = now
     approval["expires_at"] = now + WRITE_APPROVAL_TTL_SECONDS

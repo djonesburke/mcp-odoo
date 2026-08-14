@@ -82,6 +82,8 @@ from . import prompts_workflows
 # Re-export write tool functions
 from .tools_write import (
     _build_chatter_payload,
+    _client_elicitation_gap,
+    _collect_current_state,
     _elicit_write_confirmation,
     _execute_approved_write_gated,
     _write_elicitation_message,
@@ -415,6 +417,8 @@ __all__ = [
     "_single_read_lock",
     # Write internals
     "_build_chatter_payload",
+    "_client_elicitation_gap",
+    "_collect_current_state",
     "_elicit_write_confirmation",
     "_execute_approved_write_gated",
     "_write_elicitation_message",

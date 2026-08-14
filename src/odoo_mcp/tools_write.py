@@ -26,6 +26,7 @@ from .agent_tools import (
 )
 from .audit import record_write_event
 from .diagnostics import DESTRUCTIVE_METHODS, classify_method_safety
+from .field_policy import get_field_policy
 from .tool_helpers import (
     max_attachment_upload_bytes,
     normalize_domain_input,
@@ -58,6 +59,59 @@ _FROM_PATH_SUFFIX = "_from_path"
 _NONE_MARSHAL_FAULT_MARKER = "cannot marshal None unless allow_none is enabled"
 
 
+def _assert_handle_is_the_checked_entry(handle_stat: os.stat_result, path: Path) -> None:
+    """Prove the open descriptor is the directory entry that was validated.
+
+    ``O_NOFOLLOW`` is the POSIX way to refuse a swapped-in symlink, but it
+    **does not exist on Windows** — ``getattr(os, "O_NOFOLLOW", 0)`` degrades
+    to ``0`` there, so on the platform Burke actually deploys on, the open
+    silently followed whatever the final component pointed at. This check is
+    the portable enforcement: compare the identity of the file we opened
+    against the identity of the entry at ``path``, read *without* following a
+    final symlink.
+
+    Ordering makes this race-free in the direction that matters. Both stats
+    describe state after the open, so an attacker who swaps the entry at any
+    point produces a mismatch and gets refused; the only way to match is for
+    the descriptor to be the entry itself.
+
+    Residual, unchanged from upstream and equally true on POSIX: this covers
+    the final path component only, so a swapped *parent directory* is out of
+    scope, and a hard link inside the upload root is indistinguishable from
+    the file it links to (it is the same file, by definition). Neither is
+    closed by ``O_NOFOLLOW`` either — this restores parity with POSIX, it does
+    not exceed it.
+    """
+    try:
+        link_stat = os.lstat(str(path))
+    except OSError as exc:
+        raise ValueError(
+            f"{path} could not be re-checked after opening; refusing to read it"
+        ) from exc
+
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    if reparse_flag and getattr(link_stat, "st_file_attributes", 0) & reparse_flag:
+        raise ValueError(
+            f"{path} is a symlink or junction; refusing to read through it"
+        )
+    if stat.S_ISLNK(link_stat.st_mode):
+        raise ValueError(
+            f"{path} is a symlink; refusing to read through it"
+        )
+    if not link_stat.st_ino or not handle_stat.st_ino:
+        # Some network filesystems report no usable file id. Without one the
+        # identity comparison below proves nothing, and this module fails
+        # closed rather than reading bytes it cannot vouch for.
+        raise ValueError(
+            f"{path} is on a filesystem that reports no file id, so the file "
+            "read cannot be verified as the file that was checked"
+        )
+    if (link_stat.st_dev, link_stat.st_ino) != (handle_stat.st_dev, handle_stat.st_ino):
+        raise ValueError(
+            f"{path} changed between validation and read; refusing to read it"
+        )
+
+
 def _read_attachment_source_file(path: Path, cap: int) -> bytes:
     """Open, size-check, and read ``path`` through a single file descriptor.
 
@@ -65,11 +119,13 @@ def _read_attachment_source_file(path: Path, cap: int) -> bytes:
     trusted root *at resolve time*. A writable upload root still leaves a
     TOCTOU window between that check and the read: the entry on disk could
     be swapped for a symlink pointing outside the root before we get to it.
-    Opening once with ``O_NOFOLLOW`` (refuses a symlink as the final path
-    component) and deriving both the size cap and the hash from the bytes
-    read through that same fd closes the gap — the size/hash checked are
-    always the bytes actually returned, not a stale ``stat()`` from an
-    earlier, possibly-swapped file.
+    Opening once and deriving the size cap, the identity check, and the hash
+    from that same fd closes the gap — everything checked describes the bytes
+    actually returned, not a stale ``stat()`` of a since-swapped file.
+
+    ``O_NOFOLLOW`` refuses the swap up front where the platform has it;
+    ``_assert_handle_is_the_checked_entry`` is what enforces it everywhere,
+    Windows included.
     """
     try:
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -79,6 +135,7 @@ def _read_attachment_source_file(path: Path, cap: int) -> bytes:
         file_stat = os.fstat(handle.fileno())
         if not stat.S_ISREG(file_stat.st_mode):
             raise ValueError(f"{path} does not exist or is not a regular file")
+        _assert_handle_is_the_checked_entry(file_stat, path)
         if file_stat.st_size > cap:
             raise ValueError(
                 f"{path} is {file_stat.st_size} bytes; cap is {cap} "
@@ -125,41 +182,282 @@ def _srv() -> Any:
     return server
 
 
-def _write_elicitation_message(approval: Dict[str, Any]) -> str:
-    """Render a human-readable summary of the pending write."""
-    operation = str(approval.get("operation") or "?")
+_MAX_VALUE_CHARS = 80
+_MAX_LISTED_RECORDS = 20
+_REDACTED_MARKER = "<hidden by field policy>"
+
+
+def _render_value(value: Any) -> str:
+    """Render one field value for a confirmation prompt, bounded in length."""
+    text = json.dumps(value, default=str)
+    if len(text) > _MAX_VALUE_CHARS:
+        return text[:_MAX_VALUE_CHARS] + "..."
+    return text
+
+
+def _record_label(record: Dict[str, Any]) -> str:
+    """Best human-readable name for a record, or "" when none is readable."""
+    for key in ("display_name", "name", "complete_name"):
+        label = record.get(key)
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+    return ""
+
+
+def _same_value(before: Any, after: Any) -> bool:
+    """Whether a proposed write value would actually change the stored one.
+
+    Odoo returns many2one fields as ``[id, "Display Name"]`` while a write
+    passes the bare id, so a naive comparison reports every relation as
+    changed and buries the fields that really do change.
+    """
+    if (
+        isinstance(before, (list, tuple))
+        and len(before) == 2
+        and isinstance(before[0], int)
+        and isinstance(after, int)
+        and not isinstance(after, bool)
+    ):
+        return before[0] == after
+    if before is False and (after is None or after == ""):
+        return True
+    return bool(before == after)
+
+
+def _collect_current_state(
+    ctx: Context,
+    *,
+    model: str,
+    operation: str,
+    record_ids: Optional[List[int]],
+    values: Optional[Dict[str, Any]],
+    instance: Optional[str],
+) -> Dict[str, Any]:
+    """Read what a write is about to overwrite, so a human can see before -> after.
+
+    Approval prompts that echo only the proposed values read like a diff but
+    are half of one: they cannot show that a field is already at the target
+    value, and on ``unlink`` they identify records by bare integer id. This
+    reads the affected records once, at validate time, through the same field
+    ACL as every other read path — a denied field is reported as hidden, never
+    surfaced in a confirmation dialog.
+
+    Best-effort by design. A failed read returns ``available: False`` with a
+    reason that the prompt states out loud; it does not block validation,
+    because an Odoo hiccup should not be able to take the write path down. The
+    human still holds the decision either way.
+    """
+    normalized_operation = (operation or "").strip().lower()
+    if normalized_operation == "create":
+        return {"available": True, "operation": "create", "records": []}
+    ids = [int(rid) for rid in record_ids or []]
+    if not ids:
+        return {
+            "available": False,
+            "operation": normalized_operation,
+            "reason": "the approval names no record ids",
+        }
+    fields = ["id", "display_name"]
+    if normalized_operation == "write":
+        fields += [name for name in sorted(values or {}) if name not in fields]
+    read_ids = ids[:_MAX_LISTED_RECORDS]
+    try:
+        instance_name, odoo = _resolve_odoo(ctx, instance)
+        records = odoo.read_records(model, read_ids, fields=fields)
+    except Exception as exc:  # noqa: BLE001 — reported to the human, never raised
+        return {
+            "available": False,
+            "operation": normalized_operation,
+            "reason": f"could not read the current records ({type(exc).__name__})",
+        }
+    if not isinstance(records, list):
+        return {
+            "available": False,
+            "operation": normalized_operation,
+            "reason": "the current-state read returned no usable records",
+        }
+    redacted_records, redacted_fields = get_field_policy().redact_records(
+        instance_name, model, records
+    )
+    found_ids = {
+        int(record["id"]) for record in redacted_records if record.get("id") is not None
+    }
+    return {
+        "available": True,
+        "operation": normalized_operation,
+        "records": redacted_records,
+        "redacted_fields": redacted_fields,
+        "missing_ids": [rid for rid in read_ids if rid not in found_ids],
+        "not_listed": max(0, len(ids) - len(read_ids)),
+    }
+
+
+def _format_record_lines(current_state: Dict[str, Any]) -> List[str]:
+    """One "id  label" line per affected record, plus what could not be shown."""
+    lines = []
+    for record in current_state.get("records") or []:
+        label = _record_label(record)
+        lines.append(f"  {record.get('id')}  {label}" if label else f"  {record.get('id')}")
+    for missing in current_state.get("missing_ids") or []:
+        lines.append(f"  {missing}  <no such record, or not readable>")
+    not_listed = int(current_state.get("not_listed") or 0)
+    if not_listed:
+        lines.append(f"  ... and {not_listed} more not listed here")
+    return lines
+
+
+def _format_change_lines(
+    values: Dict[str, Any], current_state: Dict[str, Any]
+) -> List[str]:
+    """Per-field ``before -> after`` lines, flagging fields already at target."""
+    records = current_state.get("records") or []
+    redacted = set(current_state.get("redacted_fields") or [])
+    lines = []
+    for field in sorted(values):
+        after = _render_value(values[field])
+        if field in redacted:
+            lines.append(f"  {field}: {_REDACTED_MARKER} -> {after}")
+            continue
+        befores = {_render_value(record.get(field)) for record in records}
+        unchanged = records and all(
+            _same_value(record.get(field), values[field]) for record in records
+        )
+        if unchanged:
+            lines.append(f"  {field}: {after} (unchanged - already set)")
+        elif len(befores) == 1:
+            lines.append(f"  {field}: {befores.pop()} -> {after}")
+        elif befores:
+            lines.append(f"  {field}: <varies across records> -> {after}")
+        else:
+            lines.append(f"  {field}: <current value unread> -> {after}")
+    return lines
+
+
+def _write_elicitation_message(
+    approval: Dict[str, Any], current_state: Optional[Dict[str, Any]] = None
+) -> str:
+    """Render the pending write for a human: what it touches, and what changes.
+
+    ``current_state`` is the snapshot captured at validate time and held
+    server-side (see ``_collect_current_state``). When it is absent the prompt
+    says so in as many words rather than quietly degrading to a list of
+    proposed values that looks like a diff.
+    """
+    operation = str(approval.get("operation") or "?").strip().lower()
     model = str(approval.get("model") or "?")
     record_ids = approval.get("record_ids") or []
     values = approval.get("values") or {}
+    values_list = approval.get("values_list")
     instance = str(approval.get("instance") or "default")
-    lines = [f"Odoo write pending approval: {operation} on {model}"]
-    if record_ids:
-        lines.append(f"Records: {record_ids}")
-    if values:
-        changes = ", ".join(
-            f"{key} -> {json.dumps(value, default=str)[:80]}"
-            for key, value in sorted(values.items())
+
+    lines = [
+        f"Odoo write pending approval: {operation} on {model}",
+        f"Instance: {instance}",
+    ]
+    state: Dict[str, Any] = (
+        current_state
+        if isinstance(current_state, dict) and current_state.get("available")
+        else {}
+    )
+    have_state = bool(state)
+
+    if operation == "unlink":
+        lines.append(f"DELETES {len(record_ids)} record(s) - this cannot be undone:")
+        lines.extend(
+            _format_record_lines(state) if have_state else [f"  {record_ids}"]
         )
-        lines.append(f"Changes: {changes}")
-    lines.append(f"Instance: {instance}")
+    elif operation == "create":
+        count = len(values_list) if isinstance(values_list, list) else 1
+        lines.append(f"Creates {count} new record(s) with:")
+        for entry in (values_list if isinstance(values_list, list) else [values])[
+            :_MAX_LISTED_RECORDS
+        ]:
+            lines.extend(
+                f"  {field}: {_render_value(value)}"
+                for field, value in sorted((entry or {}).items())
+            )
+    else:
+        if record_ids:
+            lines.append(f"Records ({len(record_ids)}):")
+            lines.extend(
+                _format_record_lines(state) if have_state else [f"  {record_ids}"]
+            )
+        if values:
+            lines.append("Changes:")
+            lines.extend(
+                _format_change_lines(values, state)
+                if have_state
+                else [
+                    f"  {field} -> {_render_value(value)}"
+                    for field, value in sorted(values.items())
+                ]
+            )
+
+    if operation != "create" and not have_state:
+        reason = "not captured"
+        if isinstance(current_state, dict):
+            reason = str(current_state.get("reason") or reason)
+        lines.append(
+            f"WARNING: current values could not be read ({reason}) - the above "
+            "shows only what the write will set, not what it replaces."
+        )
     return "\n".join(lines)
+
+
+def _client_elicitation_gap(ctx: Context) -> Optional[str]:
+    """Why this client cannot be relied on to prompt a human, or None.
+
+    Returns None when the capability cannot be introspected at all — there the
+    ``ctx.elicit`` call itself is the authority on whether a human was asked.
+    """
+    capabilities = getattr(ctx, "client_capabilities", None)
+    if capabilities is None:
+        return None
+    elicitation = getattr(capabilities, "elicitation", None)
+    if elicitation is None:
+        return "the client declared no elicitation capability"
+    if (
+        getattr(elicitation, "form", None) is None
+        and getattr(elicitation, "url", None) is not None
+    ):
+        return "the client offers only URL-mode elicitation, which cannot carry a confirmation form"
+    return None
+
+
+def _approval_current_state(
+    ctx: Context, approval: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Fetch the validate-time snapshot for this approval, if one was stored."""
+    try:
+        record = require_validated_write_approval(_app_context(ctx), approval)
+    except Exception:  # noqa: BLE001 — a missing snapshot only degrades the prompt
+        return None
+    if not isinstance(record, dict):
+        return None
+    state = record.get("current_state")
+    return state if isinstance(state, dict) else None
 
 
 def _resolve_write_confirmation(
     approval: Dict[str, Any], ctx: Context
 ) -> WriteConfirmation | Elicit[WriteConfirmation]:
-    """Use MRTR on modern clients and preserve token fallback elsewhere."""
+    """Use MRTR on modern clients and preserve token fallback elsewhere.
+
+    Burke behavior 3: when the confirmation gate is ON and the client cannot
+    present a form, this refuses instead of approving. Upstream returned
+    ``approve=True`` there, so a client that could not prompt silently turned
+    "confirm every write" into "write freely" — the operator had asked for a
+    gate and got none, with no signal. ``execute_approved_write_tool`` names
+    that case separately so the refusal does not read as a human decision.
+    """
     if not truthy_env(ELICIT_WRITES_ENV):
         return WriteConfirmation(approve=True)
-    capabilities = ctx.client_capabilities
-    elicitation = getattr(capabilities, "elicitation", None)
-    supports_form = elicitation is not None and (
-        getattr(elicitation, "form", None) is not None
-        or getattr(elicitation, "url", None) is None
+    if _client_elicitation_gap(ctx) is not None:
+        return WriteConfirmation(approve=False)
+    return Elicit(
+        _write_elicitation_message(approval, _approval_current_state(ctx, approval)),
+        WriteConfirmation,
     )
-    if not supports_form:
-        return WriteConfirmation(approve=True)
-    return Elicit(_write_elicitation_message(approval), WriteConfirmation)
 
 
 # Python 3.10 wraps Annotated defaults of None in Optional, hiding Resolve.
@@ -172,14 +470,23 @@ async def _elicit_write_confirmation(
     """Ask the human via MCP elicitation when ODOO_MCP_ELICIT_WRITES=1.
 
     Returns (decision, detail): "skipped" (gate off), "approved",
-    "declined", or "unsupported" (client cannot elicit — fall back to the
-    token flow).
+    "declined", or "unsupported" (the client could not be asked at all).
+
+    Burke behavior 3: "unsupported" is a refusal, not a fallback. Upstream let
+    it fall through to the token flow — but every gate in that flow is one the
+    calling agent satisfies by itself, so an unaskable client meant the write
+    executed with no human anywhere in it.
     """
     if not truthy_env(ELICIT_WRITES_ENV):
         return "skipped", None
+    gap = _client_elicitation_gap(ctx)
+    if gap is not None:
+        return "unsupported", gap
     try:
         result = await ctx.elicit(
-            message=_write_elicitation_message(approval),
+            message=_write_elicitation_message(
+                approval, _approval_current_state(ctx, approval)
+            ),
             schema=WriteConfirmation,
         )
     except Exception as exc:
@@ -315,10 +622,24 @@ def validate_write(
             and bool(fields_metadata)
         )
         if trusted_live_metadata:
+            # Burke behavior 4: capture what this write is about to overwrite,
+            # here rather than in preview_write, because this is the step that
+            # already holds a live Odoo connection and the step whose approval
+            # record execute_approved_write reads back.
+            current_state = _collect_current_state(
+                ctx,
+                model=model,
+                operation=operation,
+                record_ids=record_ids,
+                values=values,
+                instance=instance,
+            )
+            report["current_state"] = current_state
             stored = register_write_approval(
                 _app_context(ctx),
                 report,
                 resolved_binary_values=resolved_binary_values or None,
+                current_state=current_state,
             )
             report["approval_status"] = {
                 "stored": stored,
@@ -378,6 +699,34 @@ async def execute_approved_write_tool(
         )
         decision = "approved" if approved else "declined"
         detail = str(getattr(review, "action", "declined"))
+    blocked_reason = None
+    if decision == "unsupported":
+        blocked_reason = detail or "the client could not present a confirmation prompt"
+    elif decision == "declined" and truthy_env(ELICIT_WRITES_ENV):
+        # The MRTR resolver refuses the same way a human does; only the client
+        # capability distinguishes "nobody was asked" from "someone said no".
+        blocked_reason = _client_elicitation_gap(ctx)
+    if blocked_reason is not None:
+        record_write_event(
+            "elicit",
+            outcome="blocked",
+            model=str(approval.get("model") or "") or None,
+            operation=str(approval.get("operation") or "") or None,
+            instance=str(approval.get("instance") or "") or None,
+            token=str(approval.get("token") or "") or None,
+            detail=blocked_reason,
+        )
+        return {
+            "success": False,
+            "tool": "execute_approved_write",
+            "error": (
+                f"{ELICIT_WRITES_ENV}=1 requires a human to confirm this write, "
+                f"but no human could be asked: {blocked_reason}. Refusing to "
+                "execute. Run this write from a client that supports "
+                f"elicitation, or unset {ELICIT_WRITES_ENV} to accept "
+                "agent-only approval."
+            ),
+        }
     if decision == "declined":
         record_write_event(
             "elicit",
