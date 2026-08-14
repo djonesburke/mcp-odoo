@@ -13,7 +13,7 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.5` |
+| Package version | `1.3.0+burke.6` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
 | Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + this doc |
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.5`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.6`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -236,11 +236,13 @@ Run on each machine after setup. No live Odoo write is performed.
 - [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.3`** (a bare `1.3.0` is the wrong build)
 - [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.3"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.5`
+  - [ ] `package_version` is `1.3.0+burke.6`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
   - [ ] `write_execution_enabled` matches what this machine is supposed to be
+  - [ ] `elicit_writes_enabled` is `true` on any machine where
+        `write_execution_enabled` is `true` — those two must never disagree
   - [ ] `chatter_direct_enabled` is `false`
 - [ ] **Writes-enabled machines only** — confirm the human gate is real. Preview
       and validate a harmless one-field write on **staging**, then execute it and

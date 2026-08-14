@@ -202,6 +202,23 @@ def test_human_decline_is_not_reported_as_a_client_gap(monkeypatch, tmp_path):
     assert entry["outcome"] == "declined"
 
 
+def test_health_check_reports_whether_the_confirmation_gate_is_on(monkeypatch):
+    """The gate has to be readable without exercising it.
+
+    Behavior 3 makes ODOO_MCP_ELICIT_WRITES the only gate a human stands in.
+    Confirming it by attempting a write and watching for a prompt means using a
+    write to verify the control that guards writes; the acceptance checklist
+    needs to ask a machine instead.
+    """
+    from odoo_mcp import server_core
+
+    monkeypatch.setenv(server_core.ELICIT_WRITES_ENV, "1")
+    assert server_core.runtime_security_report()["elicit_writes_enabled"] is True
+
+    monkeypatch.delenv(server_core.ELICIT_WRITES_ENV, raising=False)
+    assert server_core.runtime_security_report()["elicit_writes_enabled"] is False
+
+
 # --------------------------------------------------------------------------
 # Behavior 4 — the prompt shows what the write replaces
 # --------------------------------------------------------------------------

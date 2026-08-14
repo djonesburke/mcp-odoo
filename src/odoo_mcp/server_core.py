@@ -554,6 +554,11 @@ def runtime_security_report() -> Dict[str, Any]:
         "streamable_http_path": runtime.get("streamable_http_path"),
         "remote_http_allowed": truthy_env("MCP_ALLOW_REMOTE_HTTP"),
         "write_execution_enabled": writes_enabled(),
+        # Behavior 3 makes this the only gate a human stands in, so an operator
+        # must be able to read it back. Verifying it by attempting a write and
+        # watching for a prompt works, but requires a write to verify a control
+        # whose whole purpose is to sit in front of writes.
+        "elicit_writes_enabled": truthy_env(ELICIT_WRITES_ENV),
         "unknown_execute_method_enabled": broad_unknown_enabled,
         "chatter_direct_enabled": chatter_direct_enabled(),
         "allowed_side_effect_methods": allowed_side_effect_methods(),
