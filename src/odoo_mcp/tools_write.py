@@ -416,11 +416,19 @@ def _client_elicitation_gap(ctx: Context) -> Optional[str]:
     elicitation = getattr(capabilities, "elicitation", None)
     if elicitation is None:
         return "the client declared no elicitation capability"
-    if (
-        getattr(elicitation, "form", None) is None
-        and getattr(elicitation, "url", None) is not None
-    ):
-        return "the client offers only URL-mode elicitation, which cannot carry a confirmation form"
+    if getattr(elicitation, "form", None) is None:
+        # Form mode is the only mode that can carry a confirmation. Anything
+        # else is a client that cannot ask a human, whatever else it declares.
+        # Testing for url-mode *specifically* used to let the commonest shape
+        # through: an elicitation object with neither field set. Observed from
+        # claude-code 2.1.234, which then declines on its own, so the refusal
+        # was audited as a human decision and read like the operator said no.
+        if getattr(elicitation, "url", None) is not None:
+            return (
+                "the client offers only URL-mode elicitation, which cannot carry "
+                "a confirmation form"
+            )
+        return "the client declared an elicitation capability with no form mode"
     return None
 
 

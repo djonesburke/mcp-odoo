@@ -95,6 +95,9 @@ def _run(coro):
 FORM_CAPABLE = _Capabilities(_Elicitation(form=object()))
 NO_ELICITATION = _Capabilities(None)
 URL_ONLY = _Capabilities(_Elicitation(form=None, url="https://example.invalid/confirm"))
+# What claude-code 2.1.234 actually sends: an elicitation object with neither
+# field set. It cannot prompt, and it declines on its own when asked.
+DECLARED_EMPTY = _Capabilities(_Elicitation(form=None, url=None))
 
 
 # --------------------------------------------------------------------------
@@ -522,3 +525,49 @@ def test_a_decline_records_whether_any_human_could_have_been_asked(monkeypatch, 
     assert "client_elicitation=uninspectable" in details["nobody"]
     # The point of the change: these are no longer the same log line.
     assert details["human"] != details["nobody"]
+
+
+def test_gap_flags_an_elicitation_capability_with_no_form_mode():
+    """The shape that reached production: declared, but empty.
+
+    The check used to ask whether the client offered url-mode *specifically*,
+    so an elicitation object with neither `form` nor `url` fell through as
+    trustworthy. It cannot carry a confirmation, so it is a gap.
+    """
+    gap = tools_write._client_elicitation_gap(_CapCtx(capabilities=DECLARED_EMPTY))
+    assert gap is not None and "no form mode" in gap
+
+
+def test_empty_capability_decline_is_audited_as_blocked_not_declined(monkeypatch, tmp_path):
+    """The bug, end to end: an unaskable client must not look like a human.
+
+    Observed 2026-08-20 against staging with claude-code 2.1.234 -- writes
+    refused with no dialog shown, audited as `declined`, reading as though the
+    operator had said no. The refusal itself was always correct; the label sent
+    the reader looking for a person who had changed their mind.
+    """
+    from odoo_mcp import audit
+
+    server = importlib.import_module("odoo_mcp.server")
+    log_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv(server.ELICIT_WRITES_ENV, "1")
+    monkeypatch.setenv(audit.AUDIT_LOG_ENV, str(log_path))
+
+    result = _run(
+        server.execute_approved_write_tool(
+            _CapCtx(capabilities=DECLARED_EMPTY),
+            {"model": "res.partner", "operation": "write", "token": "bogus"},
+            confirm=True,
+            review=_Review("decline"),
+        )
+    )
+
+    assert result["success"] is False
+    assert "no human could be asked" in result["error"]
+    assert "no form mode" in result["error"]
+    # Names the remedy, not just the symptom.
+    assert server.ELICIT_WRITES_ENV in result["error"]
+
+    entry = json.loads(log_path.read_text().strip().splitlines()[-1])
+    assert entry["outcome"] == "blocked"
+    assert "client_elicitation=declared-empty" in entry["detail"]

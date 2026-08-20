@@ -13,7 +13,7 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.7` |
+| Package version | `1.3.0+burke.8` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
 | Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + this doc |
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.7`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.8`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -166,22 +166,35 @@ point where a person stands in the path. This build refuses the write and says
 why, and the refusal is audited as `blocked` rather than `declined` so the log
 distinguishes "nobody was asked" from "someone said no".
 
-**That distinction only holds when the client's capabilities can be read.** A
-client whose capabilities are not introspectable — or one that advertises form
-elicitation and then answers `decline` on its own without showing anybody a
-prompt — yields `declined`, identical to a human refusal. Observed against a
-real client on 2026-08-20: two writes refused, no dialog ever displayed, and the
-audit log reading as an operator decision both times. Every `elicit` line
-therefore now carries a `client_elicitation=` field — one of `form`,
-`url-only`, `declared-none`, `declared-empty` or `uninspectable`, plus the client
-name when the handshake supplied one. **A `declined` from an `uninspectable`
-client is the shape to distrust.** The hole itself is not closed: the server
-cannot prove a human saw a prompt, only record what the client claimed it could
-show. It is now visible after the fact instead of silent.
+**Any client that does not declare form-mode elicitation is refused as
+unaskable.** The check originally tested for url-mode *specifically*, which let
+the commonest shape through: an elicitation object with neither `form` nor `url`
+set. That is what `claude-code 2.1.234` sends — it advertises the capability,
+cannot prompt, and declines on its own. So the refusal was audited as `declined`
+and read as though the operator had said no, which sends whoever is debugging it
+looking for a person who changed their mind. It is now `blocked`, with an error
+naming the missing capability and the remedy.
 
-The practical consequence: **an unattended run cannot write.** A scheduled
-Cowork job has no one at the keyboard, so with the gate on it now fails
-visibly instead of proceeding unwatched.
+Every `elicit` line also carries `client_elicitation=` — `form`, `url-only`,
+`declared-none`, `declared-empty` or `uninspectable` — plus the client name from
+the initialize handshake. That field is what located this bug, and it is the
+first thing to read when a refusal is disputed.
+
+**Residual, genuinely not closed.** A client whose capabilities cannot be
+introspected at all still falls through to `ctx.elicit`, because there the elicit
+call is the only authority available. And a client that declares form mode and
+then declines without prompting stays indistinguishable from a human who
+declined. The server can record what a client claimed it could show; it cannot
+prove a human saw it.
+
+The practical consequence: **an unattended run cannot write, and neither can a
+client that cannot prompt.** A scheduled Cowork job has no one at the keyboard,
+so with the gate on it fails visibly instead of proceeding unwatched. As of
+2026-08-20 that also covers Claude Code, which declares no form mode — so on a
+machine with `ODOO_MCP_ELICIT_WRITES=1`, **writes from Claude Code are refused
+outright.** That is the gate working, not a defect. Doing gated writes from that
+client needs either a client that can prompt, or a deliberate, logged decision to
+unset the gate on that instance and accept agent-only approval.
 
 **Behavior 4 — the confirmation shows what the write replaces.**
 Upstream's prompt echoed the proposed values only. That reads like a diff but
@@ -249,7 +262,7 @@ Run on each machine after setup. No live Odoo write is performed.
 - [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.3`** (a bare `1.3.0` is the wrong build)
 - [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.3"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.7`
+  - [ ] `package_version` is `1.3.0+burke.8`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
