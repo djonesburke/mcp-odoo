@@ -330,11 +330,29 @@ def test_identity_check_rejects_an_entry_replaced_after_the_open(tmp_path):
     with os.fdopen(fd, "rb") as handle:
         handle_stat = os.fstat(handle.fileno())
     # Same name, different file: what an attacker winning the race leaves
-    # behind. Done after closing because Windows locks an open file against
-    # deletion — which is itself part of why the post-open swap is the harder
-    # attack there, and the pre-open symlink is the one that matters.
-    path.unlink()
-    path.write_bytes(b"bytes nobody validated")
+    # behind. The swap is an atomic replace from an entry created while the
+    # original still existed, which is what makes the two identities provably
+    # distinct — two entries coexisting on one filesystem cannot share an
+    # inode. Done after closing because Windows locks an open file against
+    # replacement — itself part of why the post-open swap is the harder attack
+    # there, and the pre-open symlink is the one that matters.
+    #
+    # Do NOT "simplify" this back to unlink-then-rewrite. ext4 hands the same
+    # inode straight back for a small file recreated in the same directory, so
+    # the identity matches, the guard correctly reports no change, and the
+    # expected ValueError never arrives. That version passes on Windows/NTFS
+    # and fails on Linux — which is exactly how it reached this branch
+    # unnoticed: the workflow runs tests on pull_request and on push to main
+    # only, so this branch had never been tested on Linux until its first PR.
+    swapped_in = tmp_path / "attacker.bin"
+    swapped_in.write_bytes(b"bytes nobody validated")
+    os.replace(str(swapped_in), str(path))
+
+    # Prove the precondition before asserting on the guard. Without this, a
+    # platform that recycled the identity would surface as the guard failing to
+    # raise — pointing the reader at production code that is behaving
+    # correctly, when the setup is what did not hold.
+    assert os.lstat(str(path)).st_ino != handle_stat.st_ino
 
     with pytest.raises(ValueError, match="changed between validation and read"):
         tools_write._assert_handle_is_the_checked_entry(handle_stat, path)
