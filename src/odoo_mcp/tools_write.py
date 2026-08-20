@@ -424,6 +424,67 @@ def _client_elicitation_gap(ctx: Context) -> Optional[str]:
     return None
 
 
+def _client_identity(ctx: Context) -> Optional[str]:
+    """Best-effort client name/version from the MCP initialize handshake.
+
+    Audit trail only. Absent on the direct-call path and on any client that
+    does not send ``clientInfo``, so every lookup here is defensive.
+    """
+    for path in (
+        ("session", "client_params", "clientInfo"),
+        ("session", "client_params", "client_info"),
+        ("client_params", "clientInfo"),
+    ):
+        node: Any = ctx
+        for attr in path:
+            node = getattr(node, attr, None)
+            if node is None:
+                break
+        if node is None:
+            continue
+        name = getattr(node, "name", None)
+        if not name:
+            continue
+        version = getattr(node, "version", None)
+        return f"{name} {version}" if version else str(name)
+    return None
+
+
+def _client_elicitation_posture(ctx: Context) -> str:
+    """What the client *claims* it can prompt with, as an audit-friendly label.
+
+    ``_client_elicitation_gap`` returns None both when the capability is
+    adequate and when it cannot be introspected, because those two cases need
+    identical runtime treatment: trust ``ctx.elicit``. They are entirely
+    different facts to whoever reads the log afterwards — one is a human who
+    said no, the other may be a client that answered without asking anybody.
+    Recording the posture is what lets those be told apart after the fact.
+    """
+    capabilities = getattr(ctx, "client_capabilities", None)
+    if capabilities is None:
+        posture = "uninspectable"
+    else:
+        elicitation = getattr(capabilities, "elicitation", None)
+        if elicitation is None:
+            posture = "declared-none"
+        elif getattr(elicitation, "form", None) is not None:
+            posture = "form"
+        elif getattr(elicitation, "url", None) is not None:
+            posture = "url-only"
+        else:
+            posture = "declared-empty"
+    identity = _client_identity(ctx)
+    return f"{posture}; client={identity}" if identity else posture
+
+
+def _elicit_audit_detail(ctx: Context, detail: Optional[str]) -> str:
+    """Pair an elicitation outcome with the client posture that produced it."""
+    posture = _client_elicitation_posture(ctx)
+    if detail:
+        return f"{detail}; client_elicitation={posture}"
+    return f"client_elicitation={posture}"
+
+
 def _approval_current_state(
     ctx: Context, approval: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
@@ -714,7 +775,7 @@ async def execute_approved_write_tool(
             operation=str(approval.get("operation") or "") or None,
             instance=str(approval.get("instance") or "") or None,
             token=str(approval.get("token") or "") or None,
-            detail=blocked_reason,
+            detail=_elicit_audit_detail(ctx, blocked_reason),
         )
         return {
             "success": False,
@@ -735,7 +796,7 @@ async def execute_approved_write_tool(
             operation=str(approval.get("operation") or "") or None,
             instance=str(approval.get("instance") or "") or None,
             token=str(approval.get("token") or "") or None,
-            detail=detail,
+            detail=_elicit_audit_detail(ctx, detail),
         )
         return {
             "success": False,

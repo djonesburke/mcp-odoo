@@ -440,3 +440,85 @@ def test_snapshot_reaches_the_approval_record_but_not_the_token(operation):
     assert stored["current_state"]["available"] is True
     assert "current_state" not in stored["payload"]
     assert server.verify_write_approval(report["approval"])[0] is True
+
+
+# --------------------------------------------------------------------------
+# Behavior 3 — a refusal records which client produced it
+# --------------------------------------------------------------------------
+
+
+def test_posture_names_each_capability_shape():
+    """The posture label is the only surviving record of what a client claimed."""
+    assert tools_write._client_elicitation_posture(FakeCtx(None)) == "uninspectable"
+    assert (
+        tools_write._client_elicitation_posture(_CapCtx(capabilities=FORM_CAPABLE)) == "form"
+    )
+    assert (
+        tools_write._client_elicitation_posture(_CapCtx(capabilities=NO_ELICITATION))
+        == "declared-none"
+    )
+    assert (
+        tools_write._client_elicitation_posture(_CapCtx(capabilities=URL_ONLY)) == "url-only"
+    )
+
+
+def test_posture_includes_client_identity_when_the_handshake_carried_one():
+    """Naming the client turns "some client declined" into a reproducible report."""
+
+    class _Info:
+        name = "acme-cli"
+        version = "9.9"
+
+    class _Params:
+        clientInfo = _Info()
+
+    class _Session:
+        client_params = _Params()
+
+    ctx = FakeCtx(None)
+    ctx.session = _Session()
+    assert (
+        tools_write._client_elicitation_posture(ctx) == "uninspectable; client=acme-cli 9.9"
+    )
+
+
+def test_a_decline_records_whether_any_human_could_have_been_asked(monkeypatch, tmp_path):
+    """The gap this closes: a client that declines without asking anybody.
+
+    ``_client_elicitation_gap`` returns None both for a form-capable client and
+    for one whose capabilities cannot be read — correctly, since both must
+    trust ``ctx.elicit`` at runtime. But both then land on the same
+    ``outcome: declined``. Observed against staging 2026-08-20: two writes
+    refused with no dialog ever shown, and the log said a human declined. The
+    posture on the audit line is what separates the two.
+    """
+    from odoo_mcp import audit
+
+    server = importlib.import_module("odoo_mcp.server")
+    monkeypatch.setenv(server.ELICIT_WRITES_ENV, "1")
+
+    details = {}
+    for label, ctx in (
+        ("human", _CapCtx(capabilities=FORM_CAPABLE)),
+        ("nobody", FakeCtx(None)),
+    ):
+        log_path = tmp_path / f"audit-{label}.jsonl"
+        monkeypatch.setenv(audit.AUDIT_LOG_ENV, str(log_path))
+        result = _run(
+            server.execute_approved_write_tool(
+                ctx,
+                {"model": "res.partner", "operation": "write", "token": "bogus"},
+                confirm=True,
+                review=_Review("decline"),
+            )
+        )
+        assert result["success"] is False
+        assert "declined by the human reviewer" in result["error"]
+        entry = json.loads(log_path.read_text().strip().splitlines()[-1])
+        assert entry["outcome"] == "declined"
+        details[label] = entry["detail"]
+
+    assert "client_elicitation=form" in details["human"]
+    assert "client_elicitation=uninspectable" in details["nobody"]
+    # The point of the change: these are no longer the same log line.
+    assert details["human"] != details["nobody"]
