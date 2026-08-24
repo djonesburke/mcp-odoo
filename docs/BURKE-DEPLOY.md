@@ -16,7 +16,7 @@ pinned build across all Burke PCs.
 | Package version | `1.3.0+burke.8` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
-| Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + this doc |
+| Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + read-only team bundle (§12) + this doc |
 
 The `+burke.N` local-version suffix is the point of the version stamp: if
 `health_check` or `--version` reports a bare `1.3.0`, the machine is running
@@ -78,6 +78,10 @@ drift apart between installs.
 
 ## 3. Claude Desktop configuration
 
+This is the hand-configured path, for an operator's own PC. For a read-only
+team machine, build the `.mcpb` bundle instead (§12) — it needs no JSON editing
+and cannot be configured wrong on arrival.
+
 `%APPDATA%\Claude\claude_desktop_config.json`. Replace every `<...>`.
 
 ```json
@@ -85,7 +89,7 @@ drift apart between installs.
   "mcpServers": {
     "odoo-staging": {
       "command": "odoo-mcp",
-      "args": ["run"],
+      "args": [],
       "env": {
         "ODOO_URL": "<https://staging.example.com>",
         "ODOO_DB": "<staging-db-name>",
@@ -99,6 +103,15 @@ drift apart between installs.
     }
   }
 }
+```
+
+There is **no `run` subcommand.** An earlier revision of this file showed
+`"args": ["run"]`; the CLI defines only flags, so argparse rejects the bare word
+and the server exits 2 before it opens stdio. The symptom in Claude is a server
+that fails to start with nothing useful on screen. Verified 2026-08-21:
+
+```
+__main__.py: error: unrecognized arguments: run
 ```
 
 ### Env var reference
@@ -259,8 +272,8 @@ to gate, which is why the read-only rollout does not depend on either of them.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.3`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.3"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.8`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.8"`
 - [ ] In Claude, call `health_check` and confirm:
   - [ ] `package_version` is `1.3.0+burke.8`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
@@ -432,3 +445,156 @@ protocol. If upstream reworks `_resolve_write_confirmation` or the SDK changes
 how client capabilities are advertised, re-run the §6 writes-enabled check by
 hand — a green test suite proves the refusal logic, not that a real Claude
 client still renders the prompt.
+
+---
+
+## 12. The team `.mcpb` bundle — read-only, one-click
+
+§3 is the hand-configured path for an operator's PC. For everyone else — Matt,
+Amber, anyone who should be able to *ask* Odoo things and change nothing — build
+a `.mcpb` and let Claude Desktop install it. The team never sees a JSON file, a
+database name, or a terminal.
+
+### Do not use the upstream bundle
+
+`scripts/build_mcpb.py` and the `.mcpb` on the upstream releases page resolve
+`uvx odoo-mcp==<version>` from **PyPI**. Burke's `+burke.N` build was never
+published there, so that bundle can only ever install vanilla upstream — with
+none of §5, and, worse for a read-only audience, none of §8. Its `user_config`
+also exposes exactly four fields (url, db, username, password) and cannot set
+`ODOO_MCP_POLICY_FILE` or `ODOO_MCP_TOOLS_EXCLUDE`, so an install from it runs
+with **field masking off and `execute_method` present**.
+
+Use `scripts/build_burke_mcpb.py` instead.
+
+### Build
+
+```bash
+uv run python scripts/build_burke_mcpb.py \
+  --instance-label prod --odoo-url <https://...> --odoo-db <db-name> --out dist
+```
+
+The bundle vendors three things: the manifest, **the wheel built from this
+checkout**, and `odoo_mcp_policy.json`. Vendoring is the point:
+
+- the wheel pins harder than a git tag, needs no git on the target PC, and
+  cannot be shadowed by `odoo-mcp-multi` (§1) because `uvx --from <wheel>`
+  resolves the console script inside that wheel only;
+- the policy travels *inside* the bundle, so `ODOO_MCP_POLICY_FILE` points at
+  `${__dirname}/odoo_mcp_policy.json` rather than at a git working copy whose
+  branch could be switched by unrelated work — the §3 warning applied to the
+  server, but a relocatable ACL is the same hazard one level down.
+
+The script refuses to build rather than produce a misleading artifact when: the
+version has no `+burke.N` suffix; the working tree is dirty (without
+`--allow-dirty`); the instance label disagrees with the url/db (the §10 failure
+mode); the policy file has no non-empty `field_acl`; or the rendered manifest
+would carry `ODOO_MCP_ENABLE_WRITES`, `ODOO_MCP_ELICIT_WRITES`,
+`MCP_CHATTER_DIRECT`, or an exclude list missing `execute_method`.
+
+Note that `git describe --dirty` only notices *tracked* edits, so the script
+appends `-UNCOMMITTED` to the provenance stamp itself. An artifact built from an
+uncommitted tree says so in its own `long_description`.
+
+### What the bundle installs
+
+| | |
+|---|---|
+| Prompts for | Odoo login + API key. Nothing else. |
+| Baked | url, db, `json2`, vendored policy path, exclude list, rotation-doc hint |
+| Excluded tools | `execute_method`, `execute_approved_write`, `chatter_post`, `preview_write`, `validate_write` |
+| Absent | `ODOO_MCP_ENABLE_WRITES`, `ODOO_MCP_ELICIT_WRITES`, `MCP_CHATTER_DIRECT` |
+
+The write tools are **removed from the tool surface**, not merely refused at
+execution. That is belt and braces on top of the missing
+`ODOO_MCP_ENABLE_WRITES`: a user cannot add env vars to an installed extension,
+so writes are unreachable by two independent mechanisms.
+
+`ODOO_MCP_AUDIT_LOG` is deliberately **not** set. `audit.record_write_event` is
+called on the write path only — preview, validate, execute, chatter. It does not
+record reads, on any machine. On a bundle with no write path it would create an
+empty file whose existence implies read auditing that does not exist. If anyone
+needs to know what the team read, that is a different mechanism and it does not
+exist yet.
+
+### Verify a built bundle
+
+```bash
+uv run python scripts/verify_burke_mcpb.py dist/<bundle>.mcpb <scratch-dir>
+```
+
+This extracts the bundle to a path containing a space (the real extensions
+directory has one), launches the exact command its manifest declares, and drives
+a real MCP handshake over stdio with fake Odoo credentials — nothing touches
+Odoo. It asserts the Burke version, `field_acl.active`, the filtered tool list,
+and that no write tool appears in `tools/list`. Verified on 2026-08-21:
+
+```
+tools exposed: 37
+write tools exposed: none
+package_version 1.3.0+burke.8   field_acl.active true
+tools_filtered  chatter_post, execute_approved_write, execute_method,
+                preview_write, validate_write
+write_execution_enabled false   chatter_direct_enabled false
+RESULT: PASS
+```
+
+In `health_check` output, `tools_filtered` sits under **`plugins`**, not at the
+top level, and the §6 posture fields sit under **`runtime`**. Worth knowing
+before concluding a field is missing.
+
+### Distribute it org-wide — do not email it
+
+Team and Enterprise plans only, and only an **Owner or Primary Owner**. The
+controls live **inside Claude Desktop**, not on claude.ai: click your initials
+or name in the lower left → **Organization settings → Connectors → "Desktop"
+tab**.
+
+Two separate actions, in this order:
+
+1. **"Add custom extension"** → pick the `.mcpb` in the file picker. It appears
+   under **Custom team extensions**.
+2. **"…"** next to it → **"Add to team"**.
+
+The team then installs in one click from Claude Desktop → Settings →
+Extensions.
+
+> **Do not touch the Allowlist toggle as part of this.** It is a separate
+> org-wide control on the same tab, and enabling it **force-deletes everyone's
+> existing extension installations** and blocks any install outside the
+> allowlist. That is a decision about the whole company, unrelated to this
+> bundle. Whether "Add to team" requires the toggle is not stated in the docs —
+> so add the extension with the toggle untouched and have one recipient check
+> their Extensions list. Only if it fails to appear is the toggle worth
+> considering, on its own merits.
+
+**The manifest `name` must be unique and must never change.** Re-uploading under
+a different `name` creates a *duplicate extension* rather than a version update.
+`build_burke_mcpb.py` derives it from `--instance-label`
+(`burke-odoo-prod-readonly`), so a staging bundle is a legitimately separate
+extension — but never rename an existing one between rebuilds.
+
+If the extension does not appear for someone, check
+`HKLM:\SOFTWARE\Policies\Claude` and `HKCU:\SOFTWARE\Policies\Claude` **on that
+PC** before assuming the upload failed. `isDesktopExtensionEnabled` and
+`isDesktopExtensionDirectoryEnabled` set to `false` override any org-level
+allowlist, silently. Both keys were absent on the build machine as of
+2026-08-21; they are per-machine, so that proves nothing about anyone else's.
+
+Emailing the file instead reintroduces exactly the drift this doc exists to
+prevent: four PCs on whatever version each person happened to receive, and no
+way to withdraw a build. One uploaded artifact is one artifact to replace.
+
+### Residual, not closed by the bundle
+
+- **`uv` must be on `PATH` for GUI apps** on each PC. The bundle vendors the
+  wheel but still launches it through `uvx`. Install with
+  `winget install --id=astral-sh.uv` and fully restart Claude Desktop.
+- **§7 still stands.** The ACL strips denied fields from *results*, not from
+  *domains* — `margin > X` as a filter still discriminates. The MCP authenticates
+  as an Odoo **admin**, so the tool config is a convenience, not a boundary. Real
+  containment is a restricted Odoo user per person. Widening the audience makes
+  that more worth doing, not less.
+- **One key per person.** Per-user keys are the same string on prod and staging
+  (§10), and `check_api_key_expiry` reports only the key it is using
+  (`visibility: own_user_only`). A shared key would make both facts worse.

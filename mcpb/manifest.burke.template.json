@@ -1,0 +1,58 @@
+{
+  "manifest_version": "0.2",
+  "name": "burke-odoo-__INSTANCE_LABEL__-readonly",
+  "display_name": "Burke Odoo — __INSTANCE_TITLE__ (read-only)",
+  "version": "__VERSION__",
+  "description": "Read-only access to Burke Truck & Equipment Odoo. Ask questions in plain English; nothing can be changed. Requires uv.",
+  "long_description": "Burke's hardened build of odoo-mcp, packaged read-only for the team.\n\nWhat it does: search and read Odoo records, run server-side aggregations, inspect schema, and produce accounting/aging reports for __ODOO_DB__.\n\nWhat it cannot do: create, change or delete any Odoo record, post to a chatter thread, or send email. The write tools are removed from the tool surface at startup, not merely disabled — see tools_filtered in health_check.\n\nField masking: margin, cost, banking details, and employee personal data are removed from results by the bundled field-ACL policy. Masked fields come back listed under redacted_fields rather than as values. Note that masking applies to returned fields, not to domain filters.\n\nCredentials: your own Odoo login and API key, entered once in the install dialog and held by the OS keychain. Never share a key between people — the report from check_api_key_expiry only covers the key it is using.\n\nBuild provenance: odoo-mcp __VERSION__, git __GIT_DESCRIBE__. Verify with health_check: package_version must show the +burke suffix. A bare version means the machine is running upstream from PyPI, which does not contain any of the Burke safety behaviors.",
+  "author": {
+    "name": "Burke Truck & Equipment",
+    "url": "https://github.com/djonesburke/mcp-odoo"
+  },
+  "homepage": "https://github.com/djonesburke/mcp-odoo",
+  "documentation": "https://github.com/djonesburke/mcp-odoo/blob/main/docs/BURKE-DEPLOY.md",
+  "support": "https://github.com/djonesburke/mcp-odoo/issues",
+  "license": "MIT",
+  "keywords": ["odoo", "erp", "burke", "read-only"],
+  "server": {
+    "type": "python",
+    "entry_point": "",
+    "mcp_config": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "${__dirname}/wheels/__WHEEL__",
+        "odoo-mcp"
+      ],
+      "env": {
+        "ODOO_URL": "__ODOO_URL__",
+        "ODOO_DB": "__ODOO_DB__",
+        "ODOO_USERNAME": "${user_config.odoo_username}",
+        "ODOO_API_KEY": "${user_config.odoo_api_key}",
+        "ODOO_TRANSPORT": "json2",
+        "ODOO_MCP_POLICY_FILE": "${__dirname}/odoo_mcp_policy.json",
+        "ODOO_MCP_TOOLS_EXCLUDE": "execute_method,execute_approved_write,chatter_post,preview_write,validate_write",
+        "ODOO_MCP_ROTATION_DOC": "Ask Dalton to rotate this key. Runbook: docs/credential-lifecycle.md in djonesburke/mcp-odoo."
+      }
+    }
+  },
+  "user_config": {
+    "odoo_username": {
+      "type": "string",
+      "title": "Your Odoo login",
+      "description": "The email address you sign in to Odoo with, e.g. you@burketruck.com",
+      "required": true
+    },
+    "odoo_api_key": {
+      "type": "string",
+      "title": "Your Odoo API key",
+      "description": "In Odoo: profile menu → My Profile → Account Security → New API Key. Use your own key, not someone else's. Ask Dalton if you do not have one.",
+      "sensitive": true,
+      "required": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32", "darwin", "linux"],
+    "runtimes": { "python": ">=3.10" }
+  }
+}
