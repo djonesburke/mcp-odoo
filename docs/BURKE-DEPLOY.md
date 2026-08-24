@@ -563,10 +563,10 @@ Extensions.
 > org-wide control on the same tab, and enabling it **force-deletes everyone's
 > existing extension installations** and blocks any install outside the
 > allowlist. That is a decision about the whole company, unrelated to this
-> bundle. Whether "Add to team" requires the toggle is not stated in the docs —
-> so add the extension with the toggle untouched and have one recipient check
-> their Extensions list. Only if it fails to appear is the toggle worth
-> considering, on its own merits.
+> bundle. **"Add to team" does not require it** — confirmed 2026-08-24: with the
+> toggle untouched, the extension appeared in a recipient's Connectors →
+> Directory. The help articles do not state this either way; that is an
+> observation, not documentation, so re-check it if the behaviour ever changes.
 
 **The manifest `name` must be unique and must never change.** Re-uploading under
 a different `name` creates a *duplicate extension* rather than a version update.
@@ -589,7 +589,16 @@ way to withdraw a build. One uploaded artifact is one artifact to replace.
 
 - **`uv` must be on `PATH` for GUI apps** on each PC. The bundle vendors the
   wheel but still launches it through `uvx`. Install with
-  `winget install --id=astral-sh.uv` and fully restart Claude Desktop.
+  `winget install --id=astral-sh.uv` and fully restart Claude Desktop. This is
+  the one real prerequisite, and the manifest format has no field to declare
+  it — so it will never appear in the extension's own Requirements list. Check
+  it yourself before blaming the bundle.
+
+  Do **not** add `compatibility.runtimes.python` to make the requirement look
+  declared. uv provisions its own Python; declaring one makes Claude Desktop
+  demand a *system* interpreter and show an unmet requirement on a machine that
+  would have run the extension fine. That is what stopped the first install
+  attempt on 2026-08-24.
 - **§7 still stands.** The ACL strips denied fields from *results*, not from
   *domains* — `margin > X` as a filter still discriminates. The MCP authenticates
   as an Odoo **admin**, so the tool config is a convenience, not a boundary. Real
