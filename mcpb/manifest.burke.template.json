@@ -52,7 +52,6 @@
     }
   },
   "compatibility": {
-    "platforms": ["win32", "darwin", "linux"],
-    "runtimes": { "python": ">=3.10" }
+    "platforms": ["win32", "darwin", "linux"]
   }
 }

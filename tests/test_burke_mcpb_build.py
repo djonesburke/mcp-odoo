@@ -167,6 +167,25 @@ def test_rendered_manifest_prompts_only_for_identity():
     assert "${user_config" not in env["ODOO_URL"]
 
 
+def test_rendered_manifest_declares_no_python_runtime():
+    """Declaring a python runtime makes the host demand a system interpreter.
+
+    This bundle launches through ``uvx``, and uv provisions its own Python, so
+    a machine with no system Python runs it fine. Declaring
+    ``runtimes: {python: ">=3.10"}`` -- inherited from the upstream template,
+    which has the same bug for the same reason -- made Claude Desktop show
+    "Python >=3.10" unmet with "this extension may not work correctly", which
+    stops a non-technical installer cold over a requirement that is not real.
+
+    The genuine prerequisite is uv, and the manifest format has no field for
+    it, so it stays in the description and the deploy doc.
+    """
+    compat = _render().get("compatibility", {})
+    assert "python" not in compat.get("runtimes", {}), (
+        "uvx supplies its own Python; declaring one demands a system interpreter"
+    )
+
+
 def test_rendered_manifest_carries_provenance():
     cfg = _render(describe="burke-1.3.0.6-3-gdeadbee-UNCOMMITTED")
     assert "1.3.0+burke.8" in cfg["version"]
