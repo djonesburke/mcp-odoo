@@ -39,14 +39,19 @@ def _load():
 
 builder = _load()
 
+#: Read from pyproject rather than pinned, so a version bump is one edit in one
+#: place. The section 6 checklist drifted three suffixes behind the build it was
+#: meant to police; a hardcoded copy here would drift the same way.
+VERSION = builder.project_version()
+
 PROD = ("prod", "https://example.com", "maindb.example.com")
 STAGING = ("staging", "https://staging.example.com", "staging.example.com")
 
 
 def _render(**overrides):
     kwargs = {
-        "version": "1.3.0+burke.8",
-        "wheel": "odoo_mcp-1.3.0+burke.8-py3-none-any.whl",
+        "version": VERSION,
+        "wheel": f"odoo_mcp-{VERSION}-py3-none-any.whl",
         "url": PROD[1],
         "db": PROD[2],
         "label": "prod",
@@ -60,7 +65,8 @@ def _render(**overrides):
 
 
 def test_burke_version_accepted():
-    builder.check_version("1.3.0+burke.8")
+    """The version this repo actually declares must pass its own guard."""
+    builder.check_version(VERSION)
 
 
 @pytest.mark.parametrize("version", ["1.3.0", "1.4.0", "0.13.0"])
@@ -188,7 +194,7 @@ def test_rendered_manifest_declares_no_python_runtime():
 
 def test_rendered_manifest_carries_provenance():
     cfg = _render(describe="burke-1.3.0.6-3-gdeadbee-UNCOMMITTED")
-    assert "1.3.0+burke.8" in cfg["version"]
+    assert VERSION in cfg["version"]
     assert "UNCOMMITTED" in cfg["long_description"]
 
 
