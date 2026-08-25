@@ -62,12 +62,17 @@ def test_bank_account_numbers_denied(acl, field):
     assert field in rule.get("deny", [])
 
 
-def test_api_key_model_is_an_exclusive_whitelist(acl):
-    """Odoo 19 exposes no key material here; this guards a future one that does."""
-    rule = acl.get("res.users.apikeys")
-    assert rule is not None
-    assert "allow" in rule
-    assert "key" not in rule["allow"]
+def test_only_pay_pii_and_bank_remain_masked(acl):
+    """The masked set is closed, and small enough to name.
+
+    Anything added here restricts a connection whose whole point is that it can
+    read the business and change nothing, so a new entry should be a decision
+    rather than a reflex. res.users.apikeys was removed on 2026-08-25 after
+    checking production: the model exposes seven fields and no key material,
+    because Odoo stores the key hashed. If a future Odoo adds one, this needs
+    revisiting -- and nothing outside this test will say so.
+    """
+    assert set(acl) == {"hr.employee", "hr.version", "res.partner.bank"}
 
 
 # --- what is deliberately open ---------------------------------------------
