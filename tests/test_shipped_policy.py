@@ -73,6 +73,20 @@ def test_api_key_model_is_an_exclusive_whitelist(acl):
 # --- what is deliberately open ---------------------------------------------
 
 
+def test_no_wildcard_rule(acl):
+    """A '*' rule masks a field on every model at once.
+
+    It carried a deny on message_ids, which read as a privacy control and was
+    not one -- mail.message is readable directly, so the only thing it bought
+    was a smaller default payload. Anything reintroduced here is company-wide
+    by construction and deserves to be noticed.
+    """
+    assert "*" not in acl, (
+        "a wildcard rule is back: it masks a field across every model, which is "
+        "almost never what someone editing one model's rule intended"
+    )
+
+
 @pytest.mark.parametrize(
     "model", ["sale.order", "sale.order.line", "product.template", "product.product"]
 )
