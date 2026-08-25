@@ -70,6 +70,28 @@ def main() -> int:
             .replace("${user_config.odoo_api_key}", "not-a-real-key")
         )
 
+    # The host does NOT always use mcp_config.command. Its launcher switches on
+    # server.type: `node` and `python` replace the command with an interpreter
+    # the host resolves itself, keeping only the manifest args; everything else
+    # falls through to using the command as written.
+    #
+    # Emulating only the written command is what let three broken bundles pass
+    # this check. A type-`python` bundle launching uvx ran fine here and could
+    # not run at all on a PC with no system Python, because the real host had
+    # thrown the uvx away.
+    server_type = manifest["server"].get("type")
+    if server_type in {"node", "python"}:
+        stem = Path(cfg["command"]).stem.lower()
+        expected = {"node": {"node"}, "python": {"python", "python3", "py"}}
+        if stem not in expected[server_type]:
+            print(
+                f"FAIL: server.type is {server_type!r}, so the host discards "
+                f"mcp_config.command ({cfg['command']!r}) and substitutes its own "
+                f"detected {server_type}. This bundle cannot run as written on a "
+                f"machine without one. Use type 'binary'."
+            )
+            return 1
+
     argv = [cfg["command"]] + [sub(a) for a in cfg["args"]]
     env = dict(os.environ)
     env.pop("ODOO_MCP_ENABLE_WRITES", None)
