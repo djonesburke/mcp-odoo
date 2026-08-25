@@ -13,7 +13,7 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.15` |
+| Package version | `1.3.0+burke.16` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
 | Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + read-only team bundle (§12) + this doc |
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.15`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.16`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -272,10 +272,10 @@ to gate, which is why the read-only rollout does not depend on either of them.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.15`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.15"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.16`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.16"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.15`
+  - [ ] `package_version` is `1.3.0+burke.16`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -319,15 +319,32 @@ margin and cost are deliberately readable (Purchasing and Accounting need
 them), so what remains masked is **only** employee pay, employee PII, and bank
 account numbers — which makes this hole narrower and worse at the same time.
 
-Closing it properly needs a restricted Odoo user rather than admin credentials,
-or not exposing raw search to the team. Read-only tool configs and skill
-defaults are conveniences, not security boundaries — Odoo per-user ACLs are the
-enforcement layer, and today they are not doing that job: every current holder
-of the team connection carries Odoo's `Employees / Administrator` and
-`Payroll / Officer` groups, so Odoo would answer a wage query on its own. The
-field ACL is not defense in depth here; it is the only depth. That is what
-`SERVICE-USERS.md` in `burke-mcp-deploy` exists to fix, and its status is still
-**not applied**.
+Closing it properly needs Odoo-side restriction, not a wider mask. Read-only
+tool configs and skill defaults are conveniences, not security boundaries —
+Odoo per-user ACLs are the enforcement layer, and **as of 2026-08-25 they are
+doing that job for one of the three holders.**
+
+Matt's Odoo groups were narrowed that day: `Payroll / Officer` removed,
+`Employees / Administrator` and `Recruitment / Administrator` downgraded to
+Officer, `Accounting / Administrator` to Read-only, and `Role / Administrator`
+swapped for `Role / User`. That last one is the important one — it implied
+`Access Rights` (group 2), the only group with write on `ir.model.access`, so
+he could previously have granted the rest back to himself. Verified by reading
+`all_group_ids` rather than `group_ids`: group 2 no longer appears. For him the
+field ACL is now genuinely defense in depth.
+
+For the other two it is still the only depth. Amber retains
+`Role / Administrator`, and so do `sales@` and an external bookkeeping account
+— all four can write `ir.model.access` and therefore re-grant themselves
+anything. Whether that is right is a business call, made and left as-is on
+2026-08-25.
+
+Do **not** reach for `SERVICE-USERS.md` here. It is **RETIRED**, not pending:
+Decision Log 2026-08-20 reversed it — Burke will not buy a per-seat Odoo user
+to change which identity an agent writes as. What that entry promised instead,
+downgrading six `ir.model.access` rows so the dashboard-builder groups lose
+write/create on `res.users`, `res.groups` and `ir.model`, is still outstanding.
+Only the holder of groups 179/180 is on that path, which today is Dalton alone.
 
 ---
 
@@ -522,7 +539,7 @@ tool list, and that no write tool appears in `tools/list`. Verified against the
 ```
 tools exposed: 37
 write tools exposed: none
-package_version 1.3.0+burke.15   field_acl.active true
+package_version 1.3.0+burke.16   field_acl.active true
 tools_filtered  chatter_post, execute_approved_write, execute_method,
                 preview_write, validate_write
 write_execution_enabled false   chatter_direct_enabled false
