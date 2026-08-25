@@ -13,7 +13,7 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.11` |
+| Package version | `1.3.0+burke.12` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
 | Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + read-only team bundle (§12) + this doc |
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.11`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.12`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -272,10 +272,10 @@ to gate, which is why the read-only rollout does not depend on either of them.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.11`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.11"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.12`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.12"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.11`
+  - [ ] `package_version` is `1.3.0+burke.12`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -311,12 +311,23 @@ machine. Every other control assumes the ACL is on.
 
 The field ACL removes denied fields from *results* and blocks *aggregation* on
 them, but does **not** block *domain filtering*. Someone can filter
-`sale.order.line` by `margin > X` and infer ranges from which rows match.
+`hr.version` by `wage > X` and infer a range from which rows come back, without
+the value ever appearing in a result.
 
-Closing this properly needs a restricted Odoo user rather than admin
-credentials, or not exposing raw search to the team. Read-only tool configs and
-skill defaults are conveniences, not security boundaries — Odoo per-user ACLs
-are the enforcement layer.
+That mattered less when the masked set was mostly commercial. As of 2026-08-25
+margin and cost are deliberately readable (Purchasing and Accounting need
+them), so what remains masked is **only** employee pay, employee PII, and bank
+account numbers — which makes this hole narrower and worse at the same time.
+
+Closing it properly needs a restricted Odoo user rather than admin credentials,
+or not exposing raw search to the team. Read-only tool configs and skill
+defaults are conveniences, not security boundaries — Odoo per-user ACLs are the
+enforcement layer, and today they are not doing that job: every current holder
+of the team connection carries Odoo's `Employees / Administrator` and
+`Payroll / Officer` groups, so Odoo would answer a wage query on its own. The
+field ACL is not defense in depth here; it is the only depth. That is what
+`SERVICE-USERS.md` in `burke-mcp-deploy` exists to fix, and its status is still
+**not applied**.
 
 ---
 
@@ -511,7 +522,7 @@ tool list, and that no write tool appears in `tools/list`. Verified against the
 ```
 tools exposed: 37
 write tools exposed: none
-package_version 1.3.0+burke.11   field_acl.active true
+package_version 1.3.0+burke.12   field_acl.active true
 tools_filtered  chatter_post, execute_approved_write, execute_method,
                 preview_write, validate_write
 write_execution_enabled false   chatter_direct_enabled false
