@@ -333,11 +333,23 @@ he could previously have granted the rest back to himself. Verified by reading
 `all_group_ids` rather than `group_ids`: group 2 no longer appears. For him the
 field ACL is now genuinely defense in depth.
 
-For the other two it is still the only depth. Amber retains
-`Role / Administrator`, and so do `sales@` and an external bookkeeping account
-— all four can write `ir.model.access` and therefore re-grant themselves
-anything. Whether that is right is a business call, made and left as-is on
-2026-08-25.
+By end of day 2026-08-25 the same was true of every team holder. Amber's
+`Role / Administrator` was swapped for `Role / User`, and `sales@` — a shared
+mailbox login — had Access Rights revoked. **Both people who use the Odoo
+connector are now constrained by Odoo itself, not by this file.**
+
+Two accounts still hold Access Rights, both deliberately: Dalton, and Burke's
+external accountant, whose grant is **direct** rather than inherited from
+`Role / Administrator` — so a role swap does not touch it, and removing it means
+removing group 2 from her user record. Reviewed and left in place on 2026-08-25.
+
+The check that settles this, and the only one worth trusting, reads
+`all_group_ids` rather than `group_ids`, because implication makes the effective
+list larger than what was granted:
+
+```
+search res.users where all_group_ids in [2] and active = true
+```
 
 Do **not** reach for `SERVICE-USERS.md` here. It is **RETIRED**, not pending:
 Decision Log 2026-08-20 reversed it — Burke will not buy a per-seat Odoo user
