@@ -841,7 +841,7 @@ wheels = [
 
 [[package]]
 name = "odoo-mcp"
-version = "1.3.0+burke.14"
+version = "1.3.0+burke.15"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

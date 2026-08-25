@@ -52,8 +52,39 @@
         "deny": [
           "acc_number",
           "sanitized_acc_number",
-          "acc_holder_name"
+          "acc_holder_name",
+          "display_name"
         ]
+      },
+      "hr.applicant": {
+        "deny": [
+          "salary_expected",
+          "salary_expected_extra",
+          "salary_proposed",
+          "salary_proposed_extra",
+          "partner_phone",
+          "email_from",
+          "linkedin_profile"
+        ]
+      },
+      "hr.bank.account.allocation.wizard.line": {
+        "deny": [
+          "acc_number",
+          "bank_account_id",
+          "display_name"
+        ]
+      },
+      "account.payment": {
+        "deny": ["partner_bank_id"]
+      },
+      "account.move": {
+        "deny": ["partner_bank_id"]
+      },
+      "account.batch.payment": {
+        "deny": ["partner_bank_id"]
+      },
+      "res.partner": {
+        "deny": ["bank_ids"]
       }
     }
   }

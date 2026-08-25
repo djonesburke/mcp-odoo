@@ -62,17 +62,58 @@ def test_bank_account_numbers_denied(acl, field):
     assert field in rule.get("deny", [])
 
 
-def test_only_pay_pii_and_bank_remain_masked(acl):
-    """The masked set is closed, and small enough to name.
+def test_masked_set_is_exactly_this(acl):
+    """The masked set is closed. Both directions are load-bearing.
 
-    Anything added here restricts a connection whose whole point is that it can
-    read the business and change nothing, so a new entry should be a decision
-    rather than a reflex. res.users.apikeys was removed on 2026-08-25 after
-    checking production: the model exposes seven fields and no key material,
-    because Odoo stores the key hashed. If a future Odoo adds one, this needs
-    revisiting -- and nothing outside this test will say so.
+    An addition restricts a connection whose point is reading the business, so
+    it should be a decision. A removal is how a leak reopens. res.users.apikeys
+    came out on 2026-08-25 after checking production: seven fields, no key
+    material, because Odoo stores the key hashed.
     """
-    assert set(acl) == {"hr.employee", "hr.version", "res.partner.bank"}
+    assert set(acl) == {
+        "hr.employee",
+        "hr.version",
+        "res.partner.bank",
+        "hr.applicant",
+        "hr.bank.account.allocation.wizard.line",
+        "account.payment",
+        "account.move",
+        "account.batch.payment",
+        "res.partner",
+    }
+
+
+def test_bank_display_name_is_denied(acl):
+    """The account number lives in the label, not only in acc_number.
+
+    Verified against production 2026-08-25: res.partner.bank display names read
+    "1017033567 - CO Bank". Denying acc_number while leaving display_name open
+    masks nothing, and it looked masked for a week.
+    """
+    assert "display_name" in acl["res.partner.bank"]["deny"]
+
+
+@pytest.mark.parametrize(
+    "model", ["account.payment", "account.move", "account.batch.payment"]
+)
+def test_bank_reference_fields_are_denied(acl, model):
+    """A many2one carries its target's display name with it.
+
+    ``account.payment.partner_bank_id`` returned
+    ``[63, "731201737 - JPMorgan Chase Bank, N.A."]`` -- the full number, on a
+    model that had no bank rule at all. Field-level masking does not follow
+    relations, so every referencing field has to be named here. This list is
+    the ones found; it is not a proof of completeness, which is why
+    SERVICE-USERS.md exists.
+    """
+    assert "partner_bank_id" in acl[model]["deny"]
+
+
+def test_recruitment_compensation_is_denied(acl):
+    """hr.applicant carries pay data outside the contract model."""
+    denied = acl["hr.applicant"]["deny"]
+    for field in ("salary_expected", "salary_proposed"):
+        assert field in denied
 
 
 # --- what is deliberately open ---------------------------------------------
