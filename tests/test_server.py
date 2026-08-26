@@ -1080,7 +1080,7 @@ class ApiKeyClient:
     """
 
     uid = 6
-    db = "production19.example.com"
+    db = "prod-db.example.com"
 
     def __init__(
         self,
@@ -1160,7 +1160,7 @@ def test_check_api_key_expiry_reports_instance_and_database():
     report = server.check_api_key_expiry(FakeCtx(ApiKeyClient()))
 
     assert report["instance"] == "default"
-    assert report["database"] == "production19.example.com"
+    assert report["database"] == "prod-db.example.com"
     assert report["instance_kind"] == "production"
     assert report["caller_uid"] == 6
     assert report["visibility"] == "own_user_only"

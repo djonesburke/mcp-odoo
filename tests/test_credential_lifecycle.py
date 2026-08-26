@@ -244,7 +244,7 @@ def test_report_reproduces_the_live_prod_key_state():
         warn_days=14,
         caller_uid=6,
         instance="prod",
-        database="production19.burketruck.com",
+        database="prod-db.example.com",
         instance_kind="production",
         instance_kind_detail="probe says production",
     )
@@ -252,7 +252,7 @@ def test_report_reproduces_the_live_prod_key_state():
     assert report["visible_key_count"] == 1
     assert report["counts"]["expiring"] == 1
     assert report["visibility"] == "own_user_only"
-    assert report["database"] == "production19.burketruck.com"
+    assert report["database"] == "prod-db.example.com"
     assert report["fields_read"] == list(APIKEY_FIELDS)
     assert any("2026-08-21" in action for action in report["actions"])
     assert any("unscoped" in action for action in report["actions"])
@@ -260,7 +260,7 @@ def test_report_reproduces_the_live_prod_key_state():
 
 def test_empty_result_is_never_reported_as_all_clear():
     report = build_expiry_report(
-        [], now=NOW, warn_days=14, caller_uid=6, database="production19"
+        [], now=NOW, warn_days=14, caller_uid=6, database="prod-db"
     )
     assert report["status"] == "no_keys_visible"
     assert "NOT an all-clear" in report["summary"]
@@ -297,7 +297,7 @@ def test_healthy_report_still_states_the_window():
         now=NOW,
         warn_days=14,
         caller_uid=6,
-        database="production19",
+        database="prod-db",
     )
     assert report["status"] == "ok"
     assert "more than 14 day(s)" in report["summary"]
