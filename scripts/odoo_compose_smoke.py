@@ -724,6 +724,7 @@ def mcp_env(
     username: str = ADMIN_LOGIN,
     password: str = ADMIN_PASSWORD,
     locale: str | None = None,
+    enable_writes: bool = False,
 ) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
@@ -737,6 +738,12 @@ def mcp_env(
             "ODOO_VERIFY_SSL": "1",
             "ODOO_ADDONS_PATHS": str(ROOT / "src"),
             "PYTHONPATH": str(ROOT / "src"),
+            # Set explicitly in BOTH directions, never inherited. os.environ is
+            # copied above, so a runner that happened to export this would
+            # otherwise hand write powers to the restricted-user smoke, whose
+            # whole job is proving a low-privilege user stays fenced in.
+            # Opt-in per call site; "0" is falsey to truthy_env.
+            "ODOO_MCP_ENABLE_WRITES": "1" if enable_writes else "0",
         }
     )
     if api_key:
@@ -820,6 +827,12 @@ async def mcp_stdio_smoke(
         api_key=api_key,
         username=username,
         password=password,
+        # This smoke drives chatter_post through preview -> approval token ->
+        # execute against a disposable container. chatter_post checks the write
+        # gate at entry, ahead of the preview branch, precisely so a server that
+        # cannot execute never hands out a token it would refuse to honour --
+        # so without this the round trip cannot even reach preview.
+        enable_writes=True,
     )
 
     server_params = StdioServerParameters(
