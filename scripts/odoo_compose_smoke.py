@@ -813,6 +813,113 @@ def parse_inspector_json(stdout: str) -> dict[str, Any]:
     return payload
 
 
+async def mcp_chatter_smoke(
+    target: VersionTarget,
+    *,
+    transport: str = "xmlrpc",
+    api_key: str | None = None,
+    username: str = ADMIN_LOGIN,
+    password: str = ADMIN_PASSWORD,
+) -> dict[str, Any]:
+    """Drive chatter_post preview -> approval token -> execute.
+
+    Split out of mcp_stdio_smoke deliberately, and the split is the point.
+    That smoke is writes-DISABLED so it can assert execute_approved_write fails
+    closed. Since 820a7ee (2026-07-30) chatter_post checks the write gate at
+    entry -- ahead of the preview branch -- so that a server which cannot
+    execute never hands out an approval token it would later refuse to honour.
+    The two requirements are contradictory inside one server process, so this
+    round trip gets its own session against the same disposable container.
+
+    Merging them by relaxing either side would have been the smaller diff and
+    the wrong one: the entry check is a security property, and deleting the
+    execute coverage would have hidden a regression rather than caught it.
+    """
+    env = mcp_env(
+        target,
+        transport=transport,
+        api_key=api_key,
+        username=username,
+        password=password,
+        enable_writes=True,
+    )
+    server_params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "odoo_mcp"],
+        env=env,
+    )
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            chatter_body = "Smoke chatter execute round-trip"
+            chatter_preview = decode_tool_json(
+                await session.call_tool(
+                    "chatter_post",
+                    arguments={
+                        "model": "res.partner",
+                        "record_id": 1,
+                        "body": chatter_body,
+                    },
+                ),
+                "chatter_post",
+            )
+            if chatter_preview.get("mode") != "preview":
+                raise AssertionError(
+                    f"chatter_post default mode should be preview: {chatter_preview}"
+                )
+            if not chatter_preview.get("approval", {}).get("token", "").startswith(
+                "odoo-write:"
+            ):
+                raise AssertionError(
+                    f"chatter_post preview missing approval token: {chatter_preview}"
+                )
+
+            chatter_executed = decode_tool_json(
+                await session.call_tool(
+                    "chatter_post",
+                    arguments={
+                        "model": "res.partner",
+                        "record_id": 1,
+                        "body": chatter_body,
+                        "approval": chatter_preview["approval"],
+                        "confirm": True,
+                    },
+                ),
+                "chatter_post",
+            )
+            if not chatter_executed.get("success"):
+                raise AssertionError(
+                    f"chatter_post execute failed: {chatter_executed}"
+                )
+            if chatter_executed.get("mode") != "execute":
+                raise AssertionError(
+                    f"chatter_post execute mode mismatch: {chatter_executed}"
+                )
+            chatter_persisted = decode_tool_json(
+                await session.call_tool(
+                    "search_records",
+                    arguments={
+                        "model": "mail.message",
+                        "domain": [
+                            ["model", "=", "res.partner"],
+                            ["res_id", "=", 1],
+                            ["body", "ilike", "round-trip"],
+                        ],
+                        "fields": ["id", "body"],
+                        "limit": 5,
+                    },
+                ),
+                "search_records",
+            )
+            if chatter_persisted.get("count", 0) < 1:
+                raise AssertionError(
+                    f"chatter_post execute did not persist a mail.message: {chatter_persisted}"
+                )
+
+            return {
+                "persisted_count": chatter_persisted.get("count", 0),
+            }
+
 async def mcp_stdio_smoke(
     target: VersionTarget,
     *,
@@ -827,12 +934,11 @@ async def mcp_stdio_smoke(
         api_key=api_key,
         username=username,
         password=password,
-        # This smoke drives chatter_post through preview -> approval token ->
-        # execute against a disposable container. chatter_post checks the write
-        # gate at entry, ahead of the preview branch, precisely so a server that
-        # cannot execute never hands out a token it would refuse to honour --
-        # so without this the round trip cannot even reach preview.
-        enable_writes=True,
+        # Deliberately writes-DISABLED. This session asserts the fail-closed
+        # property: preview_write and validate_write succeed, and
+        # execute_approved_write refuses. The chatter round trip needs the
+        # opposite and therefore runs in its own session, below.
+        enable_writes=False,
     )
 
     server_params = StdioServerParameters(
@@ -1167,70 +1273,13 @@ async def mcp_stdio_smoke(
                     f"aggregate_records picked wrong method (expected {expected_method}): {aggregate}"
                 )
 
-            chatter_body = "Smoke chatter execute round-trip"
-            chatter_preview = decode_tool_json(
-                await session.call_tool(
-                    "chatter_post",
-                    arguments={
-                        "model": "res.partner",
-                        "record_id": 1,
-                        "body": chatter_body,
-                    },
-                ),
-                "chatter_post",
+            chatter = await mcp_chatter_smoke(
+                target,
+                transport=transport,
+                api_key=api_key,
+                username=username,
+                password=password,
             )
-            if chatter_preview.get("mode") != "preview":
-                raise AssertionError(
-                    f"chatter_post default mode should be preview: {chatter_preview}"
-                )
-            if not chatter_preview.get("approval", {}).get("token", "").startswith(
-                "odoo-write:"
-            ):
-                raise AssertionError(
-                    f"chatter_post preview missing approval token: {chatter_preview}"
-                )
-
-            chatter_executed = decode_tool_json(
-                await session.call_tool(
-                    "chatter_post",
-                    arguments={
-                        "model": "res.partner",
-                        "record_id": 1,
-                        "body": chatter_body,
-                        "approval": chatter_preview["approval"],
-                        "confirm": True,
-                    },
-                ),
-                "chatter_post",
-            )
-            if not chatter_executed.get("success"):
-                raise AssertionError(
-                    f"chatter_post execute failed: {chatter_executed}"
-                )
-            if chatter_executed.get("mode") != "execute":
-                raise AssertionError(
-                    f"chatter_post execute mode mismatch: {chatter_executed}"
-                )
-            chatter_persisted = decode_tool_json(
-                await session.call_tool(
-                    "search_records",
-                    arguments={
-                        "model": "mail.message",
-                        "domain": [
-                            ["model", "=", "res.partner"],
-                            ["res_id", "=", 1],
-                            ["body", "ilike", "round-trip"],
-                        ],
-                        "fields": ["id", "body"],
-                        "limit": 5,
-                    },
-                ),
-                "search_records",
-            )
-            if chatter_persisted.get("count", 0) < 1:
-                raise AssertionError(
-                    f"chatter_post execute did not persist a mail.message: {chatter_persisted}"
-                )
 
             return {
                 "transport": transport,
@@ -1245,7 +1294,7 @@ async def mcp_stdio_smoke(
                 "aggregate_records_smoke": True,
                 "chatter_post_smoke": True,
                 "chatter_execute_smoke": True,
-                "chatter_persisted_message_count": chatter_persisted.get("count", 0),
+                "chatter_persisted_message_count": chatter["persisted_count"],
                 "aggregate_method": aggregate.get("method"),
             }
 
