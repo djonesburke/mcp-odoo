@@ -1,0 +1,21 @@
+# Pin line endings so a file's bytes survive a checkout on any machine.
+#
+# Machines here run with core.autocrlf=true, which rewrites LF to CRLF on checkout.
+# A file then stops matching the blob that records it, and any claim about its exact
+# bytes stops being reproducible after a clone.
+#
+# The rule is `text=auto eol=lf` and deliberately NOT `-text`. Measured in this repo
+# on 2026-08-26 before this file was written: 166 tracked text files, blobs pure LF
+# (0 CR in the index), working tree CRLF on 166 of them. `-text` disables conversion
+# rather than freezing anything, so git would compare CRLF on disk against LF in the
+# blob and every tracked file would go dirty -- no content change, just noise. That was
+# observed, not assumed: the same rule applied to a sibling repo produced a 31-file,
+# 5113-insertion / 5113-deletion diff that changed nothing.
+#
+# `text=auto eol=lf` leaves the blobs as they are, writes LF on checkout regardless of
+# the machine's autocrlf, and normalizes on commit so a CRLF blob cannot be introduced
+# later. `-text` is correct only where the working tree is already LF; here it is not.
+#
+# Verified in a worktree before committing: no spurious diff, no content change.
+
+* text=auto eol=lf
