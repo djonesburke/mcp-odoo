@@ -576,3 +576,21 @@ before concluding a field is missing.
 - **One key per person.** Per-user keys are the same string on prod and staging
   (§10), and `check_api_key_expiry` reports only the key it is using
   (`visibility: own_user_only`).
+
+---
+
+## 13. No Burke hostnames, database names or credentials in this repo
+
+This repo carries no Burke Odoo hostname, no Burke database name, and no
+credential of any kind — every real value is a `<PLACEHOLDER>` per the notice
+at the top of this file, filled in locally by whoever deploys it, never
+committed. That is a rule about content, not intent, so it is enforced
+mechanically rather than trusted to review: `.github/workflows/identifier-guard.yml`
+runs `scripts/check_identifiers.py` on every push and pull request, and fails
+the build if either value appears anywhere in the tracked tree.
+
+The check itself never stores or prints the values it looks for — it hashes
+tokens and compares hashes, and a failure reports a file and line number only.
+See the script's docstring for how to regenerate or extend the hash set; get
+the literal values from Dalton, and do not write them into this repo, a commit
+message, or a PR description.
