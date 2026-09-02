@@ -635,9 +635,10 @@ def aggregate_records(
     when provided.
     """
     from .tool_helpers import (
+        COUNT_MEASURE,
         formatted_read_group_missing,
+        normalize_measures,
         odoo_major_version,
-        parse_measure_spec,
     )
 
     try:
@@ -652,12 +653,7 @@ def aggregate_records(
             raise ValueError("offset must be greater than or equal to 0")
         clamped_limit = clamp_limit(limit) if limit is not None else None
         normalized_domain = normalize_domain_input(domain)
-        normalized_measures: List[str] = []
-        parsed_measures: List[tuple[str, str]] = []
-        for spec in measures or []:
-            field, agg = parse_measure_spec(spec)
-            normalized_measures.append(f"{field}:{agg}")
-            parsed_measures.append((field, agg))
+        normalized_measures, parsed_measures = normalize_measures(measures)
 
         # Field ACL: aggregating/grouping on a denied field is an inference
         # channel, so reject it outright (groupby may carry a ":granularity").
@@ -686,9 +682,14 @@ def aggregate_records(
         if order:
             formatted_kwargs["order"] = order
 
+        # Legacy read_group returns the row count as "__count" on its own; it
+        # rejects "__count" in ``fields``, so ask only for the real columns.
+        legacy_measures = [
+            spec for spec in normalized_measures if spec != COUNT_MEASURE
+        ]
         legacy_kwargs: Dict[str, Any] = {
             "domain": normalized_domain,
-            "fields": normalized_measures,
+            "fields": legacy_measures,
             "groupby": group_by,
             "lazy": lazy,
         }
