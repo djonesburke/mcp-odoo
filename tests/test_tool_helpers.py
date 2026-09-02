@@ -525,3 +525,49 @@ class TestNormalizeDomainInput:
             ["name", "=", "'; DROP TABLE--"]
         )
         assert result == [["name", "=", "'; DROP TABLE--"]]
+
+
+class TestCountMeasure:
+    """`__count` is Odoo's native row count, not a field:agg measure.
+
+    Treating it as one appended ``:sum`` and made Odoo reject the whole call
+    with ``Invalid field '__count'`` — an HTTP 500 that sent the caller
+    looking for a field that was never the problem.
+    """
+
+    def test_normalize_passes_count_through_untouched(self):
+        aggregates, parsed = tool_helpers.normalize_measures(["__count"])
+        assert aggregates == ["__count"]
+        assert parsed == []
+
+    def test_count_references_no_field(self):
+        """`__count` must not reach the field-ACL check as a field name."""
+        aggregates, parsed = tool_helpers.normalize_measures(
+            ["__count", "amount_total"]
+        )
+        assert aggregates == ["__count", "amount_total:sum"]
+        assert parsed == [("amount_total", "sum")]
+
+    def test_count_is_not_duplicated(self):
+        aggregates, _ = tool_helpers.normalize_measures(["__count", "__count"])
+        assert aggregates == ["__count"]
+
+    @pytest.mark.parametrize("spec", ["__count:sum", "__count:count", " __count :max"])
+    def test_count_with_aggregator_is_rejected_client_side(self, spec):
+        """Name the correct form instead of letting Odoo return a 500."""
+        with pytest.raises(ValueError) as excinfo:
+            tool_helpers.normalize_measures([spec])
+        message = str(excinfo.value)
+        assert "__count" in message
+        assert "id:count" in message
+
+    def test_ordinary_measures_are_unchanged(self):
+        aggregates, parsed = tool_helpers.normalize_measures(
+            ["amount_total:sum", "qty:max"]
+        )
+        assert aggregates == ["amount_total:sum", "qty:max"]
+        assert parsed == [("amount_total", "sum"), ("qty", "max")]
+
+    def test_empty_and_none_measures(self):
+        assert tool_helpers.normalize_measures(None) == ([], [])
+        assert tool_helpers.normalize_measures([]) == ([], [])

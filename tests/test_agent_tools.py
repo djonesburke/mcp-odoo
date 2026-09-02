@@ -1194,3 +1194,35 @@ def test_build_text_query_domain_rejects_blank_query():
 
     with pytest.raises(ValueError):
         agent_tools.build_text_query_domain("   ", {"name": _meta()})
+
+
+def test_select_smart_fields_drops_unbounded_json_columns():
+    """A json field has no useful size bound and must not be picked blind.
+
+    res.groups.view_group_hierarchy renders the entire group graph: asking for
+    one res.groups record with default fields returned ~84 KB, almost all of
+    it that single column. Explicit `fields=["view_group_hierarchy"]` still
+    serves it — only the curated default read declines to guess.
+    """
+    fields = {
+        "id": _meta("integer"),
+        "name": _meta(),
+        "view_group_hierarchy": _meta("json"),
+        "config_blob": _meta("json"),
+    }
+    selected = agent_tools.select_smart_fields(fields)
+    assert "id" in selected
+    assert "name" in selected
+    assert "view_group_hierarchy" not in selected
+    assert "config_blob" not in selected
+
+
+def test_rank_relevant_fields_drops_unbounded_json_columns():
+    """Schema exploration ranks the same way the default read selects."""
+    fields = {
+        "name": _meta(),
+        "view_group_hierarchy": _meta("json"),
+    }
+    ranked = [entry["field"] for entry in agent_tools.rank_relevant_fields(fields)]
+    assert "name" in ranked
+    assert "view_group_hierarchy" not in ranked

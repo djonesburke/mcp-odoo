@@ -1165,21 +1165,33 @@ def execute_method(
                     "preview_write -> validate_write -> execute_approved_write."
                 ),
             }
+        # The allowlist is resolved per instance, so the instance has to be
+        # known before the gate can answer: a method reviewed for staging must
+        # not open the same door on production.
+        instance_name, odoo = _resolve_odoo(ctx, instance)
+        refusal = check_rate(instance_name, "execute_method")
+        if refusal is not None:
+            return refusal
         review_required = safety["safety"] in {"side_effect", "unknown"}
         if (
             review_required
-            and not side_effect_method_allowed(model, method)
+            and not side_effect_method_allowed(model, method, instance_name)
             and not truthy_env("ODOO_MCP_ALLOW_UNKNOWN_METHODS")
         ):
             return {
                 "success": False,
                 "error": (
-                    "Unreviewed side-effect methods are blocked by default. Review "
-                    "custom source, then add the exact 'model.method' to the policy "
-                    "file (ODOO_MCP_POLICY_FILE, default ./odoo_mcp_policy.json, "
-                    "re-read on every request — see odoo_mcp_policy.json.example) "
-                    "or to ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS=model.method, or "
-                    "set ODOO_MCP_ALLOW_UNKNOWN_METHODS=1 only for trusted "
+                    "Unreviewed side-effect methods are blocked by default on "
+                    f"instance '{instance_name}'. Review custom source, then add "
+                    "the exact 'model.method' to the policy file "
+                    "(ODOO_MCP_POLICY_FILE, default ./odoo_mcp_policy.json, "
+                    "re-read on every request — see odoo_mcp_policy.json.example). "
+                    "allowed_side_effect_methods takes either a flat list, which "
+                    "applies to every instance, or an object keyed by instance "
+                    f"name, where only the '{instance_name}' key is consulted "
+                    "here. ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS=model.method "
+                    "applies to every instance; set "
+                    "ODOO_MCP_ALLOW_UNKNOWN_METHODS=1 only for trusted "
                     "deployments."
                 ),
                 "classification": safety,
@@ -1194,10 +1206,6 @@ def execute_method(
                 normalized_args[0] = normalize_domain_input(normalized_args[0])
                 args = normalized_args
 
-        instance_name, odoo = _resolve_odoo(ctx, instance)
-        refusal = check_rate(instance_name, "execute_method")
-        if refusal is not None:
-            return refusal
         try:
             result = odoo.execute_method(model, method, *args, **kwargs)
         except xmlrpc.client.Fault as fault:

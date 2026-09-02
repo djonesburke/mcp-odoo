@@ -523,3 +523,170 @@ class TestSideEffectMethodAllowed:
         assert (
             write_policy.side_effect_method_allowed("res.partner", "other_method") is False
         )
+
+
+class TestPerInstanceSideEffectMethods:
+    """A method reviewed for staging must not also be armed on production.
+
+    `allowed_side_effect_methods` was a flat list applied to every configured
+    instance, so allowing a method in order to test it on staging allowed it
+    on production too, for every session. The keyed form scopes it; the flat
+    form still works so no deployed config breaks.
+    """
+
+    def _write(self, tmp_path, policy):
+        policy_file = tmp_path / "odoo_mcp_policy.json"
+        policy_file.write_text(json.dumps(policy))
+        return policy_file
+
+    def test_flat_list_still_applies_to_every_instance(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(
+            tmp_path,
+            {"allowed_side_effect_methods": ["stock.picking.action_assign"]},
+        )
+        loaded = write_policy.load_side_effect_policy()
+        assert loaded["by_instance"] is None
+        assert loaded["error"] is None
+        for instance in ("default", "staging", "anything-else"):
+            assert write_policy.allowed_side_effect_methods(instance) == [
+                "stock.picking.action_assign"
+            ]
+            assert write_policy.side_effect_method_allowed(
+                "stock.picking", "action_assign", instance
+            )
+
+    def test_keyed_form_scopes_methods_to_one_instance(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(
+            tmp_path,
+            {
+                "allowed_side_effect_methods": {
+                    "default": [],
+                    "staging": ["stock.picking.action_assign"],
+                }
+            },
+        )
+        loaded = write_policy.load_side_effect_policy()
+        assert loaded["by_instance"] == {
+            "default": [],
+            "staging": ["stock.picking.action_assign"],
+        }
+        assert loaded["methods"] == []
+
+        assert write_policy.allowed_side_effect_methods("staging") == [
+            "stock.picking.action_assign"
+        ]
+        assert write_policy.side_effect_method_allowed(
+            "stock.picking", "action_assign", "staging"
+        )
+        # The whole point: production is untouched by the staging entry.
+        assert write_policy.allowed_side_effect_methods("default") == []
+        assert not write_policy.side_effect_method_allowed(
+            "stock.picking", "action_assign", "default"
+        )
+
+    def test_unrecognised_instance_key_allows_nothing(self, monkeypatch, tmp_path):
+        """Fail closed: an instance with no key inherits no methods."""
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(
+            tmp_path,
+            {
+                "allowed_side_effect_methods": {
+                    "staging": ["stock.picking.action_assign"],
+                }
+            },
+        )
+        assert write_policy.allowed_side_effect_methods("production") == []
+        assert not write_policy.side_effect_method_allowed(
+            "stock.picking", "action_assign", "production"
+        )
+
+    def test_keyed_form_accepts_review_metadata_objects(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(
+            tmp_path,
+            {
+                "allowed_side_effect_methods": {
+                    "staging": [
+                        {
+                            "method": "stock.picking.action_assign",
+                            "reviewed_by": "alice@example.com",
+                            "reason": "staging-only reservation test",
+                        }
+                    ]
+                }
+            },
+        )
+        assert write_policy.allowed_side_effect_methods("staging") == [
+            "stock.picking.action_assign"
+        ]
+
+    def test_malformed_instance_entry_fails_closed_with_an_error(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(
+            tmp_path,
+            {"allowed_side_effect_methods": {"staging": "not-a-list"}},
+        )
+        loaded = write_policy.load_side_effect_policy()
+        assert loaded["by_instance"] is None
+        assert loaded["methods"] == []
+        assert "staging" in loaded["error"]
+        assert write_policy.allowed_side_effect_methods("staging") == []
+
+    def test_wrong_top_level_type_fails_closed_with_an_error(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(tmp_path, {"allowed_side_effect_methods": "sale.order.confirm"})
+        loaded = write_policy.load_side_effect_policy()
+        assert loaded["methods"] == []
+        assert loaded["by_instance"] is None
+        assert "list" in loaded["error"]
+
+    def test_env_list_still_applies_to_every_instance(self, monkeypatch, tmp_path):
+        """The env var cannot express a per-instance list; document that it does not."""
+        monkeypatch.setenv(
+            "ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", "sale.order.action_confirm"
+        )
+        self._write(
+            tmp_path,
+            {
+                "allowed_side_effect_methods": {
+                    "staging": ["stock.picking.action_assign"],
+                }
+            },
+        )
+        assert write_policy.allowed_side_effect_methods("default") == [
+            "sale.order.action_confirm"
+        ]
+        assert write_policy.allowed_side_effect_methods("staging") == [
+            "sale.order.action_confirm",
+            "stock.picking.action_assign",
+        ]
+
+    def test_default_instance_argument_is_backward_compatible(
+        self, monkeypatch, tmp_path
+    ):
+        """Calling without an instance resolves the 'default' key."""
+        monkeypatch.delenv("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", raising=False)
+        self._write(
+            tmp_path,
+            {
+                "allowed_side_effect_methods": {
+                    "default": ["sale.order.action_confirm"],
+                    "staging": ["stock.picking.action_assign"],
+                }
+            },
+        )
+        assert write_policy.allowed_side_effect_methods() == [
+            "sale.order.action_confirm"
+        ]
+        assert write_policy.side_effect_method_allowed(
+            "sale.order", "action_confirm"
+        )
+        assert not write_policy.side_effect_method_allowed(
+            "stock.picking", "action_assign"
+        )

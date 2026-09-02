@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`aggregate_records` rejected Odoo's own `__count` aggregate.** `measures:
+  ["__count"]` was normalized to `"__count:sum"`, which Odoo answers with
+  `Invalid field '__count' on model '<model>'` — an HTTP 500 naming a field
+  that was never the problem. `__count` now passes through to
+  `formatted_read_group` verbatim, is dropped from legacy `read_group`'s
+  `fields` (where the row count is returned regardless), and contributes no
+  field name to the field-ACL check. `__count:<agg>` is refused client-side
+  with a message naming the working forms (`__count`, or `id:count`).
+- **Curated default reads could pull an unbounded `json` column.** Smart-field
+  selection skipped `binary` but not `json`, so a single record could arrive
+  as tens of kilobytes of blob — `res.groups.view_group_hierarchy` renders the
+  whole group graph, and one record measured ~84 KB. `json` joins `binary` as
+  a type the default selection declines to guess at; an explicit
+  `fields=[...]` still serves it.
+
+### Added
+
+- **`allowed_side_effect_methods` can be scoped per instance.** It was a flat
+  list applied to every configured instance, so allowing a method in order to
+  test it on staging allowed it on production too, for every session. It now
+  also accepts an object keyed by instance name, mirroring `field_acl`:
+
+      "allowed_side_effect_methods": {
+        "default": [],
+        "staging": ["stock.picking.action_assign"]
+      }
+
+  Keys are literal instance names with no inherited fallback, so an instance
+  with no key allows nothing. The flat list still works unchanged.
+  `ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS` still applies to every instance.
+- **Policy resolution is reported at startup.** Both policy files resolve
+  through a chain that can end in "nothing configured", and an absent *field*
+  policy means no masking at all — every field of every model served. That
+  state used to be reachable in silence, so a redeploy that moved the file
+  lost masking with no signal. The server now prints, on every start, which
+  file answered, how many instances carry field rules, and whether the
+  side-effect list is shared or per-instance. A configured-but-unreadable
+  policy still aborts startup, now after saying why.
+
 ## [1.3.0] - 2026-07-29
 
 ### Changed

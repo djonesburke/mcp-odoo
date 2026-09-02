@@ -76,11 +76,19 @@ def _is_technical_field_name(field_name: str) -> bool:
     return field_name.startswith(_TECHNICAL_FIELD_PREFIXES)
 
 
+# Field types whose values have no useful bound. A single one can be larger
+# than the whole rest of the response (res.groups.view_group_hierarchy is a
+# json field that renders the entire group graph — ~84 KB for one record), so
+# a curated default read must never pull one in blind. Ask for them by name
+# and they are still served.
+_UNBOUNDED_FIELD_TYPES = frozenset({"binary", "json"})
+
+
 def _is_skip_metadata(meta: dict[str, Any]) -> bool:
     if meta.get("automatic"):
         return True
     field_type = str(meta.get("type", ""))
-    if field_type == "binary":
+    if field_type in _UNBOUNDED_FIELD_TYPES:
         return True
     if meta.get("compute") and not meta.get("store", True):
         return True

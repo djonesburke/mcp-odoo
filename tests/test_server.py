@@ -4374,3 +4374,64 @@ def test_legacy_names_remain_importable_from_server():
     ]
     missing = [name for name in legacy_names if not hasattr(server, name)]
     assert missing == []
+
+
+def test_aggregate_records_accepts_native_count_on_odoo_19():
+    """`__count` reaches formatted_read_group verbatim, not as '__count:sum'."""
+    server = importlib.import_module("odoo_mcp.server")
+    client = _AggregateClient(
+        version="19.0+e",
+        rows=[{"state": "done", "__count": 616}],
+    )
+
+    result = server.aggregate_records(
+        FakeCtx(client),
+        model="mrp.production",
+        group_by=["state"],
+        measures=["__count"],
+    )
+
+    assert result["success"] is True
+    assert result["measures"] == ["__count"]
+    assert client.calls[0][1] == "formatted_read_group"
+    assert client.calls[0][2]["aggregates"] == ["__count"]
+
+
+def test_aggregate_records_drops_native_count_from_legacy_fields():
+    """Legacy read_group returns __count itself and rejects it in `fields`."""
+    server = importlib.import_module("odoo_mcp.server")
+    client = _AggregateClient(
+        version="17.0+e",
+        rows=[{"state": "draft", "__count": 2, "amount_total": 100.0}],
+    )
+
+    result = server.aggregate_records(
+        FakeCtx(client),
+        model="sale.order",
+        group_by=["state"],
+        measures=["__count", "amount_total:sum"],
+    )
+
+    assert result["success"] is True
+    assert result["method"] == "read_group"
+    # Reported back to the caller as asked for...
+    assert result["measures"] == ["__count", "amount_total:sum"]
+    # ...but only the real column is requested from Odoo.
+    assert client.calls[0][2]["fields"] == ["amount_total:sum"]
+
+
+def test_aggregate_records_rejects_count_with_aggregator():
+    """A client-side error naming the right form beats an Odoo HTTP 500."""
+    server = importlib.import_module("odoo_mcp.server")
+    client = _AggregateClient(version="19.0+e")
+
+    result = server.aggregate_records(
+        FakeCtx(client),
+        model="mrp.production",
+        group_by=["state"],
+        measures=["__count:sum"],
+    )
+
+    assert result["success"] is False
+    assert "__count" in result["error"]
+    assert client.calls == []

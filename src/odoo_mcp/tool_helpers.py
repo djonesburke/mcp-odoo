@@ -175,15 +175,27 @@ _AGGREGATION_FUNCTIONS = {
 }
 
 
+COUNT_MEASURE = "__count"
+
+
 def parse_measure_spec(spec: str) -> tuple[str, str]:
     """Split a 'field:agg' measure into (field, agg).
 
     Defaults to 'sum' when no aggregator is supplied.
     Raises ValueError on invalid shapes.
+
+    ``__count`` is Odoo's own row-count aggregate and names no field, so it
+    is not valid input here — callers route it through
+    :func:`normalize_measures` instead.
     """
     cleaned = str(spec).strip()
     if not cleaned:
         raise ValueError("measure entries must be non-empty strings")
+    if cleaned.split(":", 1)[0].strip() == COUNT_MEASURE:
+        raise ValueError(
+            f"{COUNT_MEASURE!r} is a bare row count and takes no aggregator; "
+            f"pass {COUNT_MEASURE!r} on its own, or 'id:count' to count a field."
+        )
     if ":" not in cleaned:
         return cleaned, "sum"
     field, agg = cleaned.split(":", 1)
@@ -197,6 +209,35 @@ def parse_measure_spec(spec: str) -> tuple[str, str]:
             f"{sorted(_AGGREGATION_FUNCTIONS)}."
         )
     return field, agg
+
+
+def normalize_measures(
+    measures: list[str] | None,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Normalize aggregate_records ``measures`` into Odoo aggregate specs.
+
+    Returns ``(aggregates, parsed)``: ``aggregates`` are the strings to hand
+    Odoo, ``parsed`` are the ``(field, agg)`` pairs that reference a real
+    column.
+
+    ``__count`` is Odoo's native row-count aggregate. ``formatted_read_group``
+    accepts it verbatim and it names no field, so it appears in
+    ``aggregates`` but never in ``parsed``. Appending ``:sum`` to it — which
+    is what treating it as an ordinary measure did — makes Odoo reject the
+    whole call with ``Invalid field '__count'``, sending the caller looking
+    for a field that was never the problem.
+    """
+    aggregates: list[str] = []
+    parsed: list[tuple[str, str]] = []
+    for spec in measures or []:
+        if str(spec).strip() == COUNT_MEASURE:
+            if COUNT_MEASURE not in aggregates:
+                aggregates.append(COUNT_MEASURE)
+            continue
+        field, agg = parse_measure_spec(spec)
+        aggregates.append(f"{field}:{agg}")
+        parsed.append((field, agg))
+    return aggregates, parsed
 
 
 def parse_odoo_major_version(value: Any) -> int | None:
