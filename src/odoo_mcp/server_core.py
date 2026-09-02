@@ -10,6 +10,7 @@ use late-binding via _srv() so monkeypatches applied to the server module work.
 
 import json
 import os
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -30,6 +31,7 @@ from .tool_helpers import (
     validate_model_name,
 )
 from .write_policy import (
+    DEFAULT_INSTANCE_NAME,
     allowed_side_effect_methods,
     chatter_direct_enabled,
     load_side_effect_policy,
@@ -37,7 +39,12 @@ from .write_policy import (
 )
 from .audit import audit_posture
 from .auth import auth_posture as oauth_posture
-from .field_policy import field_policy_posture, get_field_policy
+from .field_policy import (
+    FieldPolicyError,
+    field_policy_file_path,
+    field_policy_posture,
+    get_field_policy,
+)
 
 
 def package_version() -> str:
@@ -102,12 +109,98 @@ class AppContext:
             return instance, self._clients[instance]
 
 
+def report_policy_resolution() -> tuple[List[str], Optional[FieldPolicyError]]:
+    """Return startup policy-resolution lines plus any fatal field-ACL error.
+
+    The caller prints the lines and then re-raises the error, so a malformed
+    policy still aborts startup (fail closed) *after* saying why.
+
+    Both policy files resolve through a chain that can end in "nothing
+    configured", and the two ends of that chain fail in opposite directions.
+    An absent side-effect policy allows no methods, which is safe. An absent
+    **field** policy applies no masking at all — every field of every model is
+    served — and the old resolution reached that state without a word: an
+    ``ODOO_MCP_FIELD_POLICY_FILE`` pointing at a path that does not exist used
+    to surface only on the first read that tried to redact something, and an
+    unset variable with no ``odoo_mcp_policy.json`` in the working directory
+    surfaced nowhere at all. A redeploy that moved the file therefore lost
+    masking silently. So say out loud, every start, which file answered and
+    what it is enforcing.
+    """
+    lines: List[str] = []
+
+    field_path = field_policy_file_path()
+    try:
+        policy = get_field_policy()
+        rule_instances = policy.instances()
+    except FieldPolicyError as exc:
+        lines.append(
+            f"[odoo-mcp] FIELD ACL ERROR: {exc} — refusing to start rather "
+            "than serving unmasked data."
+        )
+        return lines, exc
+
+    if field_path is None:
+        lines.append(
+            "[odoo-mcp] WARNING: no field-ACL policy file configured "
+            "(ODOO_MCP_FIELD_POLICY_FILE / ODOO_MCP_POLICY_FILE unset and no "
+            "./odoo_mcp_policy.json) — NO field masking is active; every field "
+            "of every model is readable."
+        )
+    elif not rule_instances:
+        lines.append(
+            f"[odoo-mcp] WARNING: field-ACL policy {field_path} defines no "
+            "rules — NO field masking is active."
+        )
+    else:
+        lines.append(
+            f"[odoo-mcp] field ACL: {field_path} "
+            f"(instances with rules: {', '.join(rule_instances)})"
+        )
+
+    side_effect = load_side_effect_policy()
+    if side_effect["error"]:
+        lines.append(
+            f"[odoo-mcp] side-effect policy ERROR ({side_effect['path']}): "
+            f"{side_effect['error']} — no methods allowed from the file."
+        )
+    elif side_effect["path"] is None:
+        lines.append(
+            "[odoo-mcp] side-effect policy: none configured — no side-effect "
+            "methods allowed from a file."
+        )
+    else:
+        by_instance = side_effect.get("by_instance")
+        if by_instance is None:
+            lines.append(
+                f"[odoo-mcp] side-effect policy: {side_effect['path']} "
+                f"(flat list, applies to every instance: "
+                f"{len(side_effect['methods'])} method(s))"
+            )
+        else:
+            scoped = ", ".join(
+                f"{name}={len(methods)}"
+                for name, methods in sorted(by_instance.items())
+            )
+            lines.append(
+                f"[odoo-mcp] side-effect policy: {side_effect['path']} "
+                f"(per-instance; method counts: {scoped or 'none'}; an instance "
+                "with no key allows nothing)"
+            )
+    return lines, None
+
+
 @asynccontextmanager
 async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """Application lifespan for initialization and cleanup."""
     # Validate the field ACL policy at startup so a malformed policy fails
-    # closed (aborts) instead of silently running unprotected at first read.
-    get_field_policy()
+    # closed (aborts) instead of silently running unprotected at first read,
+    # and say which files answered — see report_policy_resolution.
+    lines, fatal = report_policy_resolution()
+    for line in lines:
+        print(line, file=sys.stderr)
+    if fatal is not None:
+        raise fatal
     yield AppContext()
 
 
@@ -505,17 +598,41 @@ def n_plus_one_report() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _default_instance_name() -> str:
+    """Best-effort name of the default instance, for posture reporting only.
+
+    Never raises: a posture readout must not be able to break health_check.
+    """
+    try:
+        return str(_srv().resolve_default_instance_name()) or DEFAULT_INSTANCE_NAME
+    except Exception:
+        return DEFAULT_INSTANCE_NAME
+
+
 def _side_effect_policy_posture() -> Dict[str, Any]:
-    """Summarize where reviewed side-effect methods come from."""
+    """Summarize where reviewed side-effect methods come from.
+
+    Reports the resolution an operator would otherwise have to infer: whether
+    the file's list is shared by every instance or keyed per instance, and in
+    the keyed case which instances carry entries. An instance absent from a
+    keyed policy allows nothing.
+    """
     policy = load_side_effect_policy()
     raw_env = os.environ.get("ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS", "")
     env_methods = [item.strip() for item in raw_env.split(",") if item.strip()]
-    return {
+    by_instance = policy.get("by_instance")
+    posture: Dict[str, Any] = {
         "file": policy["path"],
         "file_method_count": len(policy["methods"]),
         "env_method_count": len(env_methods),
         "error": policy["error"],
+        "scope": "all-instances" if by_instance is None else "per-instance",
     }
+    if by_instance is not None:
+        posture["file_methods_by_instance"] = {
+            name: len(methods) for name, methods in sorted(by_instance.items())
+        }
+    return posture
 
 
 def instance_posture() -> Dict[str, Any]:
@@ -561,7 +678,9 @@ def runtime_security_report() -> Dict[str, Any]:
         "elicit_writes_enabled": truthy_env(ELICIT_WRITES_ENV),
         "unknown_execute_method_enabled": broad_unknown_enabled,
         "chatter_direct_enabled": chatter_direct_enabled(),
-        "allowed_side_effect_methods": allowed_side_effect_methods(),
+        "allowed_side_effect_methods": allowed_side_effect_methods(
+            _default_instance_name()
+        ),
         "side_effect_policy": _side_effect_policy_posture(),
         "broad_unknown_method_mode": {
             "enabled": broad_unknown_enabled,

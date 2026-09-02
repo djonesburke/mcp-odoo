@@ -244,7 +244,7 @@ Optional environment variables:
 | `ODOO_MCP_LOG_FILE` | unset | Path → enable rotating file handler (10MB × 3 backups). |
 | `ODOO_MCP_ENABLE_WRITES` | `0` | Required for `execute_approved_write`. |
 | `ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS` | empty | Exact `model.method` allowlist (e.g. `sale.order.action_confirm`). |
-| `ODOO_MCP_POLICY_FILE` | `./odoo_mcp_policy.json` if present | Version-controllable side-effect allowlist with review metadata (see `odoo_mcp_policy.json.example`); merged with the env allowlist. |
+| `ODOO_MCP_POLICY_FILE` | `./odoo_mcp_policy.json` if present | Version-controllable side-effect allowlist with review metadata (see `odoo_mcp_policy.json.example`); merged with the env allowlist. `allowed_side_effect_methods` is either a flat list (every instance) or an object keyed by instance name, so a method can be enabled on staging without arming production. The resolved paths and scope are logged at startup. |
 | `ODOO_MCP_ALLOW_UNKNOWN_METHODS` | `0` | Broad mode for `execute_method`. Prefer the exact allowlist above. |
 | `ODOO_MCP_AUDIT_LOG` | unset | Path → append one JSONL line per write-path event (preview/validate/execute/chatter), tokens stored as digests. |
 | `ODOO_MCP_ELICIT_WRITES` | `0` | Truthy → `execute_approved_write` asks the human via MCP elicitation (native confirm form with a diff summary) before executing; falls back to the token flow when the client cannot elicit. |

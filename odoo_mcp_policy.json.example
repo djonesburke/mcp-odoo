@@ -1,5 +1,5 @@
 {
-  "comment": "Reviewed side-effect methods for execute_method. Commit this file to git so every allowlist change goes through PR review. Activate by copying to ./odoo_mcp_policy.json or pointing ODOO_MCP_POLICY_FILE at it.",
+  "comment": "Reviewed side-effect methods for execute_method. Commit this file to git so every allowlist change goes through PR review. Activate by copying to ./odoo_mcp_policy.json or pointing ODOO_MCP_POLICY_FILE at it. allowed_side_effect_methods takes either a flat list, which applies to EVERY configured instance, or an object keyed by instance name (see allowed_side_effect_methods_per_instance_example below) when a method should be testable on staging without also being armed on production. The startup log names which form applied.",
   "allowed_side_effect_methods": [
     {
       "method": "sale.order.action_confirm",
@@ -9,6 +9,18 @@
     },
     "stock.picking.button_validate"
   ],
+  "allowed_side_effect_methods_per_instance_example": {
+    "default": [],
+    "staging": [
+      {
+        "method": "stock.picking.action_assign",
+        "reviewed_by": "your-name",
+        "date": "2026-09-02",
+        "reason": "Reserve-stock behaviour has to be exercised on staging first; production must not accept it."
+      }
+    ]
+  },
+  "allowed_side_effect_methods_per_instance_note": "Rename this key to 'allowed_side_effect_methods' to use the keyed form (it replaces the flat list above). Keys are literal instance names, exactly as in field_acl -- there is no inherited fallback, so an instance with no key allows nothing. ODOO_MCP_ALLOWED_SIDE_EFFECT_METHODS cannot express this: that env list applies to every instance.",
   "field_acl_comment": "Optional read-path field ACL. Per instance (use 'default' for the default instance), per model, exactly one of 'deny' (blacklist) or 'allow' (exclusive whitelist). '*' is a per-instance model wildcard. Denied fields are removed from every read tool, resource, and knowledge index, with a redacted_fields note; aggregation on a denied field is rejected. No field_acl key = no change. See docs/field-acl.md.",
   "field_acl": {
     "default": {
