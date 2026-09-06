@@ -69,9 +69,18 @@ def test_masked_set_is_exactly_this(acl):
     it should be a decision. A removal is how a leak reopens. res.users.apikeys
     came out on 2026-08-25 after checking production: seven fields, no key
     material, because Odoo stores the key hashed.
+
+    2026-09-06 added three keys, each a decision: '*' (see
+    test_wildcard_is_exactly_the_bank_account_fields), hr.employee.public --
+    which mirrors hr.employee and was handing over work_phone and job_title
+    that hr.employee withholds -- and hr.leave, whose private_name is a
+    free-text reason field.
     """
     assert set(acl) == {
+        "*",
         "hr.employee",
+        "hr.employee.public",
+        "hr.leave",
         "hr.version",
         "res.partner.bank",
         "hr.applicant",
@@ -119,17 +128,57 @@ def test_recruitment_compensation_is_denied(acl):
 # --- what is deliberately open ---------------------------------------------
 
 
-def test_no_wildcard_rule(acl):
-    """A '*' rule masks a field on every model at once.
+def test_wildcard_is_exactly_the_bank_account_fields(acl):
+    """A '*' rule masks a field on every model at once, so it stays pinned.
 
-    It carried a deny on message_ids, which read as a privacy control and was
-    not one -- mail.message is readable directly, so the only thing it bought
-    was a smaller default payload. Anything reintroduced here is company-wide
-    by construction and deserves to be noticed.
+    This test used to assert no wildcard existed. That was right for the rule
+    it was written against: the old '*' carried a deny on message_ids, which
+    read as a privacy control and was not one -- mail.message is readable
+    directly, so all it bought was a smaller payload. It was removed
+    2026-08-25 and the tripwire put in its place.
+
+    It came back 2026-09-06 for the opposite reason, and the earlier premise --
+    that a wildcard is almost never what someone editing one model's rule
+    intended -- no longer holds for this one. A survey that day found the same
+    data class masked on one model and readable on another three separate
+    times: partner_bank_id denied on account.payment and returned on
+    account.bank.statement.line; work_phone and job_title withheld by
+    hr.employee and handed over by hr.employee.public; and bank account
+    numbers reachable through account.journal.bank_acc_number, a related field
+    pointing at the very field res.partner.bank denies. A per-model list
+    cannot protect a data class, because the class is reachable from every
+    model that mirrors or joins to it.
+
+    So the tripwire is kept and re-aimed rather than deleted. The wildcard is
+    pinned to exactly the bank-account field names. The last two were missed on
+    the first pass and caught on review: a many2one to res.partner.bank returns
+    the account number in its label, so every relation to that model leaks
+    whatever it is named, and account.journal.bank_account_id and
+    account.move.line.employee_bank_account_id are two such relations. That is
+    the same fault this wildcard exists to close, committed once more while
+    closing it -- which is why the set is pinned here and not left to whoever
+    edits the policy next. Any other wildcard deny --
+    and in particular any wildcard on a business field like amount, balance or
+    margin, which would break Purchasing and Accounting company-wide -- still
+    trips this test, which is what the original guard was for.
     """
-    assert "*" not in acl, (
-        "a wildcard rule is back: it masks a field across every model, which is "
-        "almost never what someone editing one model's rule intended"
+    rule = acl.get("*")
+    assert rule is not None, (
+        "the wildcard rule is gone: it is what keeps a masked data class from "
+        "leaking through any model that mirrors or joins to it"
+    )
+    assert set(rule) == {"deny"}, "the wildcard must be a deny rule, never an allow"
+    assert set(rule["deny"]) == {
+        "acc_number",
+        "bank_acc_number",
+        "account_number",
+        "partner_bank_id",
+        "bank_account_id",
+        "employee_bank_account_id",
+    }, (
+        "the wildcard deny set changed: it masks a field across every model, so "
+        "anything added here is company-wide by construction and deserves to be "
+        "noticed"
     )
 
 
