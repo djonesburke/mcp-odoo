@@ -1,9 +1,19 @@
 {
   "comment": "Burke Truck & Equipment — reviewed side-effect methods for execute_method. Change only via PR.",
   "allowed_side_effect_methods": [],
-  "field_acl_comment": "Read-path field ACL. Per instance ('default' = default instance), per model, exactly one of 'deny' (blacklist) or 'allow' (exclusive whitelist). '*' is a per-instance model wildcard, currently unused. 2026-08-25, Dalton's decision: commercial masking removed, and the wildcard deny on message_ids with it — it was a payload-size guard, not a privacy control, and it protected nothing, since mail.message is fully readable on its own. Explicit field lists remain the right habit behind the Cloudflare WAF. margin, purchase_price, standard_price and partner credit/balance are readable — Purchasing and Accounting need them, and a read-only connection is a reasonable place to get them. What remains is not commercial. hr.employee uses 'allow' deliberately: an exclusive whitelist is strictly stricter than enumerating PII to deny, and it stays safe when Odoo adds new sensitive fields on upgrade. hr.version (Odoo 19 contract/wage model) keeps an explicit deny list because it has no small readable subset. res.partner.bank hides account numbers. res.users.apikeys was also whitelisted for upgrade-safety and was dropped on Dalton's instruction the same day: the model carries exactly seven fields in Odoo 19 — id, display_name, name, user_id, scope, create_date, expiration_date — and no key or key-prefix among them, since Odoo stores the key hashed. Verified against production before removing, so this opened nothing that existed. If a future Odoo adds a key field to that model, this decision needs revisiting, and nothing here will remind you. These stay masked because Odoo does not reliably refuse a payroll read on its own. As of 2026-08-25 that is holder-dependent: Matt's groups were narrowed (Payroll/Officer removed, Role/Administrator swapped for Role/User, so Access Rights is gone from his all_group_ids) and for him this file is genuine defense in depth. Amber still holds Role/Administrator and therefore Access Rights, so she can rewrite ir.model.access and re-grant herself anything — for her this file is the only control, and a determined reader can defeat it anyway via domain filtering on a denied field. Treat the mask as a guard against accident and casual curiosity, never as a boundary. Do not reach for SERVICE-USERS.md: it is RETIRED, reversed by Decision Log 2026-08-20. Change only via PR.",
+  "field_acl_comment": "Read-path field ACL. Per instance ('default' = default instance), per model, exactly one of 'deny' (blacklist) or 'allow' (exclusive whitelist). '*' is a per-instance model wildcard whose rules merge with the specific model's: deny sets union, allow sets intersect (see the 2026-09-06 note below for what it now carries). 2026-08-25, Dalton's decision: commercial masking removed, and the wildcard deny on message_ids with it — it was a payload-size guard, not a privacy control, and it protected nothing, since mail.message is fully readable on its own. Explicit field lists remain the right habit behind the Cloudflare WAF. margin, purchase_price, standard_price and partner credit/balance are readable — Purchasing and Accounting need them, and a read-only connection is a reasonable place to get them. What remains is not commercial. hr.employee uses 'allow' deliberately: an exclusive whitelist is strictly stricter than enumerating PII to deny, and it stays safe when Odoo adds new sensitive fields on upgrade. hr.version (Odoo 19 contract/wage model) keeps an explicit deny list because it has no small readable subset. res.partner.bank hides account numbers. res.users.apikeys was also whitelisted for upgrade-safety and was dropped on Dalton's instruction the same day: the model carries exactly seven fields in Odoo 19 — id, display_name, name, user_id, scope, create_date, expiration_date — and no key or key-prefix among them, since Odoo stores the key hashed. Verified against production before removing, so this opened nothing that existed. If a future Odoo adds a key field to that model, this decision needs revisiting, and nothing here will remind you. These stay masked because Odoo does not reliably refuse a payroll read on its own. As of 2026-08-25 that is holder-dependent: Matt's groups were narrowed (Payroll/Officer removed, Role/Administrator swapped for Role/User, so Access Rights is gone from his all_group_ids) and for him this file is genuine defense in depth. Amber still holds Role/Administrator and therefore Access Rights, so she can rewrite ir.model.access and re-grant herself anything — for her this file is the only control, and a determined reader can defeat it anyway via domain filtering on a denied field. Treat the mask as a guard against accident and casual curiosity, never as a boundary. Do not reach for SERVICE-USERS.md: it is RETIRED, reversed by Decision Log 2026-08-20. 2026-09-06: the '*' wildcard is back, and this time it is a data-class rule rather than the payload-size guard it was before. Three separate findings that day each showed the same field name masked on one model and readable on another — partner_bank_id was denied on account.payment but came back in full on account.bank.statement.line, and work_phone and job_title were whitelisted away on hr.employee but readable on hr.employee.public, which mirrors the same people. The lesson is that a per-model list cannot protect a data class. It protects the models someone remembered to enumerate, and Odoo keeps adding models that carry the same field, so the list is wrong the day it is written and gets worse on every upgrade. Bank account numbers are therefore denied everywhere by name, and the names are the point: a many2one to res.partner.bank returns its label, and that label is the account number — '731201737 - JPMorgan...' — so every relation to that model leaks whatever it is called. The set is acc_number, bank_acc_number, account_number, partner_bank_id, bank_account_id and employee_bank_account_id. The last two were added on review the same day, after the first four were written up as covering it 'everywhere' and did not: account.journal.bank_account_id is the field bank_acc_number is related through, and account.move.line.employee_bank_account_id arrives with hr_payroll_account, which auto-installs alongside payroll and accounting. That miss is worth recording rather than quietly fixing — it is the same fault the wildcard exists to close, made once more while closing it, which is the argument for pinning the set in a test rather than trusting anyone to enumerate it correctly. The per-model bank entries below are left in place as a record of where each one was first found, not because the wildcard needs them. hr.employee.public gets the same exclusive 'allow' whitelist as hr.employee, for the reason already given above: it is the unprivileged mirror of the same records, and enumerating its PII to deny would leave whatever field the next upgrade adds readable. hr.leave denies private_name and name, the free-text 'Time Off Description' fields, which staff routinely use to write down a medical or family reason. Change only via PR.",
   "field_acl": {
     "default": {
+      "*": {
+        "deny": [
+          "acc_number",
+          "bank_acc_number",
+          "account_number",
+          "partner_bank_id",
+          "bank_account_id",
+          "employee_bank_account_id"
+        ]
+      },
       "hr.employee": {
         "allow": [
           "name",
@@ -11,6 +21,21 @@
           "department_id",
           "job_id",
           "parent_id"
+        ]
+      },
+      "hr.employee.public": {
+        "allow": [
+          "name",
+          "work_email",
+          "department_id",
+          "job_id",
+          "parent_id"
+        ]
+      },
+      "hr.leave": {
+        "deny": [
+          "private_name",
+          "name"
         ]
       },
       "hr.version": {
