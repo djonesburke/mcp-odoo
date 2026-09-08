@@ -47,6 +47,23 @@ def test_allow_is_exclusive_whitelist():
     assert sorted(redacted) == ["salary", "ssn"]
 
 
+def test_empty_allow_closes_a_model_completely():
+    """An empty whitelist is the shape used for absence models.
+
+    It is legal (a list of strings, and exactly one of deny/allow), it is
+    strictly stricter than any deny list, and it stays correct when Odoo adds
+    a field -- which is why the 2026-09-08 absence ruling is expressed this
+    way rather than as an enumeration. Pinned because "allow: []" reads like
+    a mistake to anyone who has not met this test.
+    """
+    policy = make({"default": {"hr.leave": {"allow": []}}})
+    kept, redacted = policy.filter_fields(
+        "default", "hr.leave", ["id", "employee_id", "state", "whatever_odoo_adds"]
+    )
+    assert kept == ["id"]
+    assert sorted(redacted) == ["employee_id", "state", "whatever_odoo_adds"]
+
+
 def test_id_is_never_redacted():
     policy = make({"default": {"res.partner": {"allow": ["name"]}}})
     kept, redacted = policy.filter_fields("default", "res.partner", ["id", "x"])
@@ -357,15 +374,139 @@ def test_public_employee_matches_hr_employee_exactly(shipped):
     )
 
 
-def test_time_off_description_is_denied(shipped):
-    """hr.leave name/private_name are free text where staff write the reason."""
+@pytest.mark.parametrize(
+    "model",
+    [
+        "hr.leave",
+        "hr.leave.report",
+        "hr.leave.report.calendar",
+        "hr.leave.employee.type.report",
+    ],
+)
+def test_absence_facts_are_withheld_not_just_the_reason(shipped, model):
+    """2026-09-08 ruling: the fact of the absence goes, not only the reason.
+
+    This test asserted the opposite until that ruling. It pinned employee_id,
+    date_from and state as kept on hr.leave and only the two free-text
+    description fields as redacted -- which was the conservative half the
+    2026-09-06 brief proposed and the owner declined. The old assertion is
+    what an absence leak looks like when it is passing its tests, so the
+    reversal is recorded here rather than quietly rewritten.
+    """
     kept, redacted = shipped.filter_fields(
         "default",
-        "hr.leave",
-        ["id", "employee_id", "date_from", "state", "name", "private_name"],
+        model,
+        [
+            "id",
+            "employee_id",
+            "date_from",
+            "date_to",
+            "state",
+            "holiday_status_id",
+            "number_of_days",
+            "name",
+            "private_name",
+            "display_name",
+        ],
     )
-    assert kept == ["id", "employee_id", "date_from", "state"]
-    assert sorted(redacted) == ["name", "private_name"]
+    assert kept == ["id"], f"{model} still returns {kept}"
+    assert "employee_id" in redacted and "state" in redacted
+
+
+def test_closure_calendar_keeps_the_closure_and_drops_the_person(shipped):
+    """The narrowed absence model: a shop shutdown still reads."""
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "resource.calendar.leaves",
+        [
+            "id",
+            "date_from",
+            "date_to",
+            "time_type",
+            "resource_id",
+            "name",
+            "holiday_id",
+        ],
+    )
+    assert kept == ["id", "date_from", "date_to", "time_type"]
+    assert sorted(redacted) == ["holiday_id", "name", "resource_id"]
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["account.analytic.line", "hr.leave.report", "resource.calendar.leaves"],
+)
+def test_leave_relations_are_redacted_wherever_they_appear(shipped, model):
+    """An hr.leave label names the person, the leave type and the duration.
+
+    The policy filters the model being read, not the far end of a relation --
+    the same reason a res.partner.bank label had to be denied by field name on
+    every model that references it.
+    """
+    _, redacted = shipped.filter_fields(
+        "default", model, ["holiday_id", "leave_id"]
+    )
+    assert sorted(redacted) == ["holiday_id", "leave_id"]
+
+
+def test_per_employee_rate_is_not_computable(shipped):
+    """employee + hours + cost on one row is a rate one division away."""
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "account.analytic.line",
+        [
+            "id",
+            "date",
+            "amount",
+            "unit_amount",
+            "account_id",
+            "employee_id",
+            "user_id",
+            "job_title",
+            "manager_id",
+        ],
+    )
+    assert kept == ["id", "date", "amount", "unit_amount", "account_id"]
+    assert sorted(redacted) == [
+        "employee_id",
+        "job_title",
+        "manager_id",
+        "user_id",
+    ]
+
+
+def test_cash_position_is_redacted_on_both_paths(shipped):
+    """Two models carry it, and the journal one is a JSON blob.
+
+    account.journal.kanban_dashboard is computed text carrying the account
+    balance, the last statement balance and the outstanding-payment balance
+    as formatted currency. Verified read-only against production 2026-09-08:
+    returned in full, redacted_fields null. A rule that only covered
+    account.bank.statement would have looked complete and left the cash
+    position one call away.
+    """
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "account.bank.statement",
+        [
+            "id",
+            "date",
+            "journal_id",
+            "balance_start",
+            "balance_end",
+            "balance_end_real",
+        ],
+    )
+    assert kept == ["id", "date", "journal_id"]
+    assert sorted(redacted) == ["balance_end", "balance_end_real", "balance_start"]
+
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "account.journal",
+        ["id", "name", "type", "current_statement_balance", "kanban_dashboard"],
+    )
+    assert kept == ["id", "name", "type"]
+    assert sorted(redacted) == ["current_statement_balance", "kanban_dashboard"]
 
 
 @pytest.mark.parametrize(
@@ -382,11 +523,12 @@ def test_wildcard_did_not_close_the_deliberately_open_fields(shipped, model, fie
     """2026-08-25: Purchasing and Accounting need these; a wildcard is exactly
     the kind of edit that could take them out company-wide by accident.
 
-    account.analytic.line is deliberately NOT in this list. Its employee_id,
-    amount and unit_amount yield a per-employee rate by division and are an
-    open question for the owner (fix brief 2026-09-06, section 4), not a field
-    set the 2026-08-25 decision ever covered. Pinning it here as settled would
-    make the next session argue with a test to implement his ruling."""
+    account.analytic.line is still deliberately NOT in this list, and now for
+    a settled reason rather than an open one: the owner ruled on 2026-09-08
+    that employee_id is denied there, so the per-employee rate is not
+    computable. Its amount and unit_amount are pinned as open by
+    test_per_employee_rate_is_not_computable instead, which is where that
+    trade-off now lives."""
     kept, redacted = shipped.filter_fields("default", model, fields)
     assert kept == fields and redacted == []
 
