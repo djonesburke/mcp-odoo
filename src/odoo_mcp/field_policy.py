@@ -2,7 +2,10 @@
 
 Opt-in, per-instance, per-model field allow/deny rules applied to every path
 that returns record data: read tools, aggregate validation, the knowledge
-indexer, ``odoo://`` resources, and ``get_model_fields`` metadata.
+indexer, ``odoo://`` resources, and ``get_model_fields`` metadata. Denied
+fields are refused as *filters* as well as withheld as output
+(:meth:`FieldPolicy.check_domain`), because a domain over a denied field
+answers a question about it without ever returning the column.
 
 Design mirrors :mod:`write_policy`: env var -> JSON file -> validated,
 cached structure. No policy file means no behavior change (zero-friction
@@ -39,6 +42,46 @@ from .write_policy import policy_file_path
 FIELD_POLICY_FILE_ENV = "ODOO_MCP_FIELD_POLICY_FILE"
 FIELD_ACL_KEY = "field_acl"
 ALWAYS_KEPT = frozenset({"id"})
+
+# Domain leaves whose value is itself a domain over the related model.
+SUBDOMAIN_OPERATORS = frozenset({"any", "not any", "any!", "not any!"})
+# A domain is caller data; cap the walk rather than trust its nesting.
+MAX_DOMAIN_DEPTH = 8
+
+
+def _domain_field_segments(domain: Any, _depth: int = 0) -> List[str]:
+    """First path segment of every field a domain filters on.
+
+    Walks the domain recursively so a field hidden inside an ``any`` /
+    ``not any`` sub-domain is seen too, and keeps only the first segment of a
+    dotted path (``employee_id.name`` -> ``employee_id``) because that is the
+    field the policy is keyed on. Logic operators (``&``, ``|``, ``!``) carry
+    no field name.
+
+    Sub-domain leaves are attributed to the *same* model rather than to the
+    related model: resolving the comodel would need an Odoo read, and
+    over-refusing is the fail-closed direction.
+    """
+    segments: List[str] = []
+    if _depth > MAX_DOMAIN_DEPTH or not isinstance(domain, (list, tuple)):
+        return segments
+    for leaf in domain:
+        if isinstance(leaf, str) or not isinstance(leaf, (list, tuple)):
+            continue
+        if len(leaf) == 3 and isinstance(leaf[0], str):
+            name, operator, value = leaf
+            head = name.split(".", 1)[0].strip()
+            if head:
+                segments.append(head)
+            if (
+                isinstance(operator, str)
+                and operator.strip().lower() in SUBDOMAIN_OPERATORS
+            ):
+                segments.extend(_domain_field_segments(value, _depth + 1))
+            continue
+        # Any other nesting is treated as a domain in its own right.
+        segments.extend(_domain_field_segments(leaf, _depth + 1))
+    return segments
 
 
 class FieldPolicyError(ValueError):
@@ -152,6 +195,34 @@ class FieldPolicy:
             return (
                 "Field policy denies access to "
                 f"{sorted(redacted)} on {model}; aggregation on restricted "
+                "fields is blocked to prevent inference."
+            )
+        return None
+
+    def check_domain(self, instance: str, model: str, domain: Any) -> Optional[str]:
+        """Return an error string if a domain filters on a denied field.
+
+        Redacting the *output* of a read leaves the filter itself as an
+        inference channel: a domain on a denied field turns any column that
+        is still allowed -- or the row count on its own -- into an answer
+        about the denied one. One aggregate grouped by month and filtered to
+        a single employee is the per-person series; one count bisected over
+        dates is a named person's absence. Closing that is why this exists
+        (2026-09-08 adversarial review, finding B3).
+
+        Fails closed, reads nothing from Odoo, and names only the model and
+        the field names -- never a value carried in the domain, which may be
+        the very record content the rule withholds. An empty ``allow`` list
+        therefore refuses every domain except one over ``id``.
+        """
+        segments = _domain_field_segments(domain)
+        if not segments:
+            return None
+        _, redacted = self.filter_fields(instance, model, segments)
+        if redacted:
+            return (
+                "Field policy denies access to "
+                f"{sorted(set(redacted))} on {model}; filtering on restricted "
                 "fields is blocked to prevent inference."
             )
         return None

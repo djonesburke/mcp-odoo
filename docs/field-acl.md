@@ -59,6 +59,7 @@ unprotected.
 | --- | --- |
 | `search_records`, `read_record` | Denied fields removed from each record; response gains `redacted_fields: [...]`. |
 | `aggregate_records` | Grouping or aggregating on a denied field is **rejected** with a clear error (prevents value inference). |
+| **Domains**, on every read path | Filtering on a denied field is **rejected** before Odoo is read, on `search_records`, `aggregate_records`, `index_knowledge`, `search_across_instances`, `aggregate_across_instances` and the `odoo://search/...` resource. Redacting the output alone leaves the filter as an inference channel: narrow the rows to one denied value and every column still returned -- or the bare row count -- answers a question about it. Dotted paths are matched on their first segment (`employee_id.name` is `employee_id`) and `any` / `not any` sub-domains are walked. |
 | `get_model_fields` | Denied fields are **marked** `"access": "restricted"` (not hidden) so the agent knows the field exists and can explain the redaction; `restricted_fields` listed. |
 | `index_knowledge` | Denied fields are excluded before BM25 indexing, so their values are never cached or searchable. |
 | `odoo://record/...`, `odoo://search/...` resources | Denied fields removed; `_redacted_fields` noted. |
@@ -84,6 +85,12 @@ withheld, so it does not hallucinate their absence or values.
   with an explanatory error if so. Being outside redaction is a design
   choice; answering around the mask is not. With no policy file it behaves
   exactly as before.
+- **A sub-domain is judged against the model being read**, not the related
+  model: an `any` / `not any` leaf carries a domain over the comodel, and
+  resolving which model that is would need an Odoo read on the refusal path.
+  So a sub-domain field name is checked against the outer model's rules,
+  which can refuse a read that a comodel-aware check would have allowed.
+  That is the fail-closed direction and the reason it is not "fixed".
 - **`read_attachment`** returns attachment metadata + content. Field ACL
   applies to the metadata dict; it does not parse attachment *payloads*. Do
   not rely on it to redact secrets embedded inside attachment bytes.

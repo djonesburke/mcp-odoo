@@ -269,3 +269,111 @@ def test_search_holidays_still_answers_when_the_policy_spares_it(
     )
     assert result.success is True
     assert result.result[0].state == "validate"
+
+
+# --- domain filtering: the question, not just the answer -------------------
+#
+# Every read below asks only for fields nobody denied, so output redaction
+# passes them through untouched. The domain is what turns each one into an
+# answer about the denied field -- a filtered aggregate is the per-person
+# series, a bare count bisected over dates is a named person's absence. The
+# 2026-09-08 adversarial review (B3) found this open on all six enforcement
+# paths at once; these pin the four that run in-process here, and
+# tests/test_cross_instance.py pins the other two.
+
+
+class CountingPolicyClient(PolicyClient):
+    """PolicyClient that records whether Odoo was reached at all."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def search_read(self, *args, **kwargs):
+        self.calls += 1
+        return super().search_read(*args, **kwargs)
+
+
+def test_search_records_refuses_a_domain_over_a_denied_field(deny_credit_limit):
+    client = CountingPolicyClient()
+    out = server.search_records(
+        FakeCtx(client),
+        model="res.partner",
+        domain=[["credit_limit", ">", 1000]],
+        fields=["name"],
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"]
+    assert client.calls == 0, "the refusal must happen before Odoo is read"
+
+
+def test_search_records_refusal_does_not_echo_the_domain_value(deny_credit_limit):
+    """A domain value can be the content the rule withholds."""
+    out = server.search_records(
+        FakeCtx(CountingPolicyClient()),
+        model="res.partner",
+        domain=[["credit_limit", "=", 424242]],
+    )
+    assert out["success"] is False
+    assert "424242" not in out["error"]
+    assert "credit_limit" in out["error"] and "res.partner" in out["error"]
+
+
+def test_search_records_still_answers_an_allowed_domain(deny_credit_limit):
+    out = server.search_records(
+        FakeCtx(PolicyClient()),
+        model="res.partner",
+        domain=[["name", "ilike", "a"]],
+    )
+    assert out["success"] is True
+    assert out["count"] == 2
+    assert out["redacted_fields"] == ["credit_limit"]
+
+
+def test_aggregate_refuses_a_domain_only_narrowing(deny_credit_limit):
+    """group_by and measures are all open; the domain is the whole attack."""
+    out = server.aggregate_records(
+        FakeCtx(PolicyClient()),
+        model="res.partner",
+        group_by=["country_id"],
+        measures=["id:count"],
+        domain=[["credit_limit", ">", 0]],
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"]
+
+
+def test_index_knowledge_refuses_a_domain_over_a_denied_field(deny_credit_limit):
+    client = CountingPolicyClient()
+    out = server.index_knowledge(
+        FakeCtx(client),
+        model="res.partner",
+        domain=[["credit_limit", ">", 1000]],
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"]
+    assert client.calls == 0
+
+
+def test_search_resource_refuses_a_domain_over_a_denied_field(
+    deny_credit_limit, monkeypatch
+):
+    client = CountingPolicyClient()
+    monkeypatch.setattr(server, "get_odoo_client", lambda: client)
+    payload = json.loads(
+        server.search_records_resource(
+            "res.partner", json.dumps([["credit_limit", ">", 1000]])
+        )
+    )
+    assert "credit_limit" in payload["error"]
+    assert client.calls == 0
+
+
+def test_search_records_refuses_a_dotted_path_to_a_denied_field(deny_credit_limit):
+    """The relation is not a way around the rule."""
+    out = server.search_records(
+        FakeCtx(CountingPolicyClient()),
+        model="res.partner",
+        domain=[["credit_limit.whatever", "=", 1]],
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"]

@@ -423,6 +423,13 @@ def search_records(
         if offset < 0:
             raise ValueError("offset must be greater than or equal to 0")
         normalized_domain = normalize_domain_input(domain)
+        # Field ACL: refuse a domain over a denied field before Odoo is read.
+        # Redacting the output alone leaves the filter as an inference channel.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model, normalized_domain
+        )
+        if domain_block is not None:
+            return {"success": False, "error": domain_block}
         query_fields_used: Optional[List[str]] = None
         if query is not None and str(query).strip():
             metadata = _cached_fields_metadata(
@@ -431,6 +438,13 @@ def search_records(
             query_domain, query_fields_used = build_text_query_domain(
                 query, metadata
             )
+            # The free-text shortcut builds its own domain from the model's
+            # searchable text fields, which can include a denied one.
+            query_block = get_field_policy().check_domain(
+                instance_name, model, query_domain
+            )
+            if query_block is not None:
+                return {"success": False, "error": query_block}
             normalized_domain = query_domain + normalized_domain
         resolved_fields = resolve_read_fields(
             app_context, odoo, model, fields, instance_name
@@ -664,6 +678,14 @@ def aggregate_records(
         )
         if aggregate_block is not None:
             return {"success": False, "error": aggregate_block}
+        # The domain is the other half: group_by and measures can all be open
+        # fields while the domain narrows the rows to one denied value, which
+        # makes the aggregate itself the answer about that value.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model, normalized_domain
+        )
+        if domain_block is not None:
+            return {"success": False, "error": domain_block}
 
         major = odoo_major_version(odoo)
         method_used = "read_group"

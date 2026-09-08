@@ -3555,15 +3555,20 @@ def test_search_holidays_returns_results_with_employee_filter(monkeypatch, tmp_p
                 }
             ]
 
-    result = server.search_holidays(
-        FakeCtx(_Client()),
-        start_date="2024-01-01",
-        end_date="2024-01-31",
-        employee_id=7,
-    )
-    assert result.success is True
-    assert result.result[0].name == "Vacation"
-    reset_field_policy()
+    try:
+        result = server.search_holidays(
+            FakeCtx(_Client()),
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            employee_id=7,
+        )
+        assert result.success is True
+        assert result.result[0].name == "Vacation"
+    finally:
+        # In a finally: a failing assert would otherwise leak this "no policy"
+        # verdict into the process-wide cache and every later test would run
+        # unmasked (2026-09-08 review, S4).
+        reset_field_policy()
 
 
 def test_search_holidays_returns_error_on_search_failure(monkeypatch, tmp_path):
@@ -3578,12 +3583,14 @@ def test_search_holidays_returns_error_on_search_failure(monkeypatch, tmp_path):
         def search_read(self, *args, **kwargs):
             raise RuntimeError("rpc")
 
-    result = server.search_holidays(
-        FakeCtx(_Client()), start_date="2024-01-01", end_date="2024-01-31"
-    )
-    assert result.success is False
-    assert "rpc" in result.error
-    reset_field_policy()
+    try:
+        result = server.search_holidays(
+            FakeCtx(_Client()), start_date="2024-01-01", end_date="2024-01-31"
+        )
+        assert result.success is False
+        assert "rpc" in result.error
+    finally:
+        reset_field_policy()
 
 
 # ----- prompt rendering -------------------------------------------------

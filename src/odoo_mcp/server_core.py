@@ -800,8 +800,14 @@ def search_records_resource(model_name: str, domain: str) -> str:
         domain_list = json.loads(domain)
         if not isinstance(domain_list, list):
             raise ValueError("domain must decode to an Odoo domain list")
-        results = odoo_client.search_read(model_name, domain_list, limit=10)
         instance_name = _srv().resolve_default_instance_name()
+        # Field ACL: refuse a domain over a denied field before Odoo is read.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model_name, domain_list
+        )
+        if domain_block is not None:
+            raise ValueError(domain_block)
+        results = odoo_client.search_read(model_name, domain_list, limit=10)
         filtered, redacted = get_field_policy().redact_records(
             instance_name, model_name, results
         )

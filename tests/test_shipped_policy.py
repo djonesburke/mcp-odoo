@@ -201,8 +201,14 @@ def test_closure_calendar_hides_the_person_not_the_closure(acl):
         )
 
 
-def test_per_employee_rate_is_not_computable(acl):
+def test_person_key_fields_are_denied_on_analytic_lines(acl):
     """Ruling: deny employee_id on analytic lines.
+
+    Named for what it proves. The 2026-09-08 review showed the rate still
+    reachable on this model through ``name`` (mrp_workorder_hr_account writes
+    "[EMPL] <work order> - <employee>" into it) and directly on
+    mrp.workcenter.productivity.employee_cost -- both open decisions for
+    Dalton, so this test claims only that the ruling's fields are denied.
 
     employee_id plus unit_amount plus amount on one row is a rate per person
     per hour, one division away, and hr.version.wage being masked does not

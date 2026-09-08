@@ -35,6 +35,10 @@ def _isolate_developer_odoo_config(monkeypatch, tmp_path):
     a local run mean the same thing as a CI run. Tests that want a policy set
     one explicitly via monkeypatch, which overrides this.
     """
+    # Imported here, not at module scope: the sys.path insert above is what
+    # makes odoo_mcp importable at all.
+    from odoo_mcp.field_policy import reset_field_policy
+
     for var in (
         "ODOO_URL",
         "ODOO_DB",
@@ -45,6 +49,23 @@ def _isolate_developer_odoo_config(monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("ODOO_CONFIG_FILE", str(tmp_path / "no-odoo-config.json"))
+    # Clearing the variables is not enough to reach the no-policy baseline:
+    # discovery falls back to the bare relative name "odoo_mcp_policy.json",
+    # which resolves against the working directory -- the repo root under
+    # pytest, where this project ships one. So every test that neither sets a
+    # policy nor chdir'd was silently running against Burke's shipped rules
+    # (found 2026-09-08; review finding S4). An empty directory of its own
+    # removes that: it is not tmp_path itself, so a test may still write a
+    # policy into tmp_path and control discovery by chdir'ing there.
+    neutral_cwd = tmp_path / "neutral-cwd"
+    neutral_cwd.mkdir(exist_ok=True)
+    monkeypatch.chdir(neutral_cwd)
+    # The loaded policy is process-global, so a test that sets one must not be
+    # able to leave it behind for the next -- including when it fails an
+    # assert on the way out.
+    reset_field_policy()
+    yield
+    reset_field_policy()
 
 
 @pytest.fixture

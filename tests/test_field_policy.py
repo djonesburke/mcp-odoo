@@ -204,6 +204,104 @@ def test_check_aggregate_blocks_denied_field():
     assert policy.check_aggregate("default", "account.move.line", ["partner_id"]) is None
 
 
+# --- check_domain: the filter is an inference channel of its own -----------
+#
+# Output redaction answers "may this seat see the column". It does not answer
+# "may this seat ask a question about the column", and a domain is exactly
+# that question: filter to one denied value and every column still returned --
+# or the bare row count -- becomes the answer. Found by the 2026-09-08
+# adversarial review (B3) on six enforcement paths at once.
+
+
+def test_check_domain_blocks_a_denied_leaf():
+    policy = make({"default": {"hr.leave": {"deny": ["employee_id"]}}})
+    err = policy.check_domain(
+        "default", "hr.leave", [["employee_id", "=", 7], ["state", "=", "validate"]]
+    )
+    assert err is not None and "employee_id" in err
+    assert (
+        policy.check_domain("default", "hr.leave", [["state", "=", "validate"]]) is None
+    )
+
+
+def test_check_domain_takes_the_first_segment_of_a_dotted_path():
+    """``employee_id.name`` reaches the same field through the relation."""
+    policy = make({"default": {"hr.leave": {"deny": ["employee_id"]}}})
+    err = policy.check_domain(
+        "default", "hr.leave", [["employee_id.name", "ilike", "somebody"]]
+    )
+    assert err is not None and "employee_id" in err
+
+
+def test_check_domain_walks_any_subdomains():
+    """A sub-domain leaf hides a field name one level down."""
+    policy = make({"default": {"account.analytic.line": {"deny": ["employee_id"]}}})
+    for operator in ("any", "not any", "ANY", "not any!"):
+        err = policy.check_domain(
+            "default",
+            "account.analytic.line",
+            [["account_id", operator, [["employee_id", "=", 7]]]],
+        )
+        assert err is not None, operator
+        assert "employee_id" in err
+
+
+def test_check_domain_ignores_logic_operators_and_empty_domains():
+    policy = make({"default": {"hr.leave": {"deny": ["employee_id"]}}})
+    assert policy.check_domain("default", "hr.leave", []) is None
+    assert policy.check_domain("default", "hr.leave", None) is None
+    assert (
+        policy.check_domain(
+            "default",
+            "hr.leave",
+            ["&", ["state", "=", "validate"], "|", ["id", "=", 1], ["id", "=", 2]],
+        )
+        is None
+    )
+
+
+def test_check_domain_on_an_empty_allow_refuses_everything_but_id():
+    """``allow: []`` closes the model, so any domain over it is a question
+    about a field the seat may not read. ``id`` is never redactable."""
+    policy = make({"default": {"hr.leave": {"allow": []}}})
+    assert policy.check_domain("default", "hr.leave", [["id", "in", [1, 2]]]) is None
+    err = policy.check_domain(
+        "default", "hr.leave", [["date_from", ">=", "2026-01-01"]]
+    )
+    assert err is not None and "date_from" in err
+
+
+def test_check_domain_error_text_carries_no_domain_values():
+    """The refusal names the model and the field names and nothing else.
+
+    A domain value can be the very content the rule withholds -- a person's
+    name in an ilike, an account number in an equals -- so echoing the domain
+    back would leak through the error the mask exists to prevent.
+    """
+    policy = make({"default": {"hr.leave": {"deny": ["employee_id"]}}})
+    err = policy.check_domain(
+        "default", "hr.leave", [["employee_id.name", "ilike", "Nobody Real"]]
+    )
+    assert err is not None
+    assert "Nobody Real" in str([["employee_id.name", "ilike", "Nobody Real"]])
+    assert "Nobody Real" not in err
+    assert "ilike" not in err
+    assert "hr.leave" in err and "employee_id" in err
+
+
+def test_check_domain_is_inert_without_a_policy():
+    """No policy file, no behaviour change -- the upstream guarantee."""
+    policy = FieldPolicy({})
+    assert policy.check_domain("default", "hr.leave", [["employee_id", "=", 7]]) is None
+
+
+def test_check_domain_survives_a_malformed_domain():
+    """Domains arrive from a caller; a junk shape must not raise here."""
+    policy = make({"default": {"hr.leave": {"deny": ["employee_id"]}}})
+    for junk in ("garbage", 7, {"conditions": []}, [None, 3, ["x"]], [[]]):
+        assert policy.check_domain("default", "hr.leave", junk) is None
+
+
 def test_restricted_fields_for_metadata_marking():
     policy = make({"default": {"res.partner": {"deny": ["credit_limit"]}}})
     restricted = policy.restricted_fields(
@@ -449,8 +547,17 @@ def test_leave_relations_are_redacted_wherever_they_appear(shipped, model):
     assert sorted(redacted) == ["holiday_id", "leave_id"]
 
 
-def test_per_employee_rate_is_not_computable(shipped):
-    """employee + hours + cost on one row is a rate one division away."""
+def test_person_key_fields_are_denied_on_analytic_lines(shipped):
+    """employee + hours + cost on one row is a rate one division away.
+
+    Named for what it proves, not for what it would be nice to have proved.
+    The 2026-09-08 review (B1) showed the rate is still reachable on this very
+    model through ``name`` -- ``mrp_workorder_hr_account`` writes the employee
+    name into it as ``[EMPL] <work order> - <employee>`` -- and directly on
+    ``mrp.workcenter.productivity.employee_cost`` (B2). Both are open
+    decisions for Dalton, so this test pins the person-key fields the ruling
+    named and claims nothing about computability.
+    """
     kept, redacted = shipped.filter_fields(
         "default",
         "account.analytic.line",
@@ -475,7 +582,7 @@ def test_per_employee_rate_is_not_computable(shipped):
     ]
 
 
-def test_cash_position_is_redacted_on_both_paths(shipped):
+def test_cash_position_presentations_are_denied_on_both_models(shipped):
     """Two models carry it, and the journal one is a JSON blob.
 
     account.journal.kanban_dashboard is computed text carrying the account
@@ -484,6 +591,12 @@ def test_cash_position_is_redacted_on_both_paths(shipped):
     returned in full, redacted_fields null. A rule that only covered
     account.bank.statement would have looked complete and left the cash
     position one call away.
+
+    "Presentations", not "the cash position": the 2026-09-08 review (B5)
+    showed account.account.current_balance on asset_cash accounts,
+    account.bank.statement.line.running_balance and a balance:sum aggregate
+    over account.move.line all still answer the same question for every seat.
+    Whether to deny them is Dalton's call, not this test's claim.
     """
     kept, redacted = shipped.filter_fields(
         "default",
@@ -525,10 +638,10 @@ def test_wildcard_did_not_close_the_deliberately_open_fields(shipped, model, fie
 
     account.analytic.line is still deliberately NOT in this list, and now for
     a settled reason rather than an open one: the owner ruled on 2026-09-08
-    that employee_id is denied there, so the per-employee rate is not
-    computable. Its amount and unit_amount are pinned as open by
-    test_per_employee_rate_is_not_computable instead, which is where that
-    trade-off now lives."""
+    that employee_id is denied there. Its amount and unit_amount are pinned as
+    open by test_person_key_fields_are_denied_on_analytic_lines instead, which
+    is where that trade-off now lives -- along with the residual paths that
+    keep the per-employee rate reachable until Dalton rules on them."""
     kept, redacted = shipped.filter_fields("default", model, fields)
     assert kept == fields and redacted == []
 
@@ -537,3 +650,62 @@ def test_id_survives_the_shipped_wildcard(shipped):
     for model in ("hr.employee", "hr.employee.public", "hr.leave", "sale.order"):
         kept, _ = shipped.filter_fields("default", model, ["id"])
         assert kept == ["id"], model
+
+
+def test_shipped_policy_refuses_a_domain_over_a_denied_field(shipped):
+    """The two models the 2026-09-08 rulings closed, attacked by domain.
+
+    Both reads below return only fields nobody denied -- dates, hours, cost,
+    an id -- so output redaction lets them through untouched. The domain is
+    what makes them an answer about a named person, and check_domain is what
+    refuses them.
+    """
+    # Ruling 2's model: group_by and measures are all open fields; the domain
+    # is the whole attack (review finding B3, first failing read).
+    err = shipped.check_domain(
+        "default", "account.analytic.line", [["employee_id", "=", 7]]
+    )
+    assert err is not None
+    assert "account.analytic.line" in err and "employee_id" in err
+
+    # Ruling 1's model: allow: [] closes it, so bisecting a count over dates
+    # is refused along with everything else that is not id.
+    err = shipped.check_domain(
+        "default",
+        "hr.leave",
+        [
+            ["employee_id.name", "ilike", "somebody"],
+            ["date_from", ">=", "2026-01-01"],
+            ["date_from", "<", "2026-02-01"],
+        ],
+    )
+    assert err is not None and "hr.leave" in err
+
+
+def test_shipped_policy_still_allows_an_open_domain(shipped):
+    """Refusing every domain would be a mask nobody could work with."""
+    assert (
+        shipped.check_domain(
+            "default",
+            "account.analytic.line",
+            [["date", ">=", "2026-01-01"], ["amount", "<", 0]],
+        )
+        is None
+    )
+    assert (
+        shipped.check_domain(
+            "default",
+            "sale.order",
+            [["partner_id", "=", 1], ["state", "=", "sale"]],
+        )
+        is None
+    )
+    assert shipped.check_domain("default", "hr.leave", [["id", "=", 1]]) is None
+
+
+def test_shipped_wildcard_denies_holiday_id_as_a_filter(shipped):
+    """The wildcard fields are filters as well as columns."""
+    err = shipped.check_domain(
+        "default", "account.analytic.line", [["holiday_id", "!=", False]]
+    )
+    assert err is not None and "holiday_id" in err

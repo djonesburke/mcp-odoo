@@ -212,3 +212,61 @@ def test_opt_out_instance_excluded(monkeypatch):
     out = server.search_across_instances(_ctx(), model="res.partner")
     assert list(out["results"]) == ["acme"]
     assert "globex" not in out["results"] and "globex" not in out["errors"]
+
+
+# --- domain filtering across instances -------------------------------------
+#
+# The fan-out tools redact each instance's rows but passed the domain straight
+# through, so a filter over a denied field answered on the instance that
+# denies it (2026-09-08 review, B3). The check runs inside the worker because
+# field ACL rules are keyed on instance: one fan-out can legitimately refuse
+# for 'acme' and answer for 'globex'.
+
+
+def _deny_credit_limit_for_acme(monkeypatch, tmp_path):
+    import json
+
+    pf = tmp_path / "fp.json"
+    pf.write_text(
+        json.dumps({"field_acl": {"acme": {"res.partner": {"deny": ["credit_limit"]}}}})
+    )
+    monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(pf))
+    reset_field_policy()
+
+
+def test_search_across_refuses_a_denied_domain_per_instance(monkeypatch, tmp_path):
+    _deny_credit_limit_for_acme(monkeypatch, tmp_path)
+    _patch_instances(monkeypatch)
+    out = server.search_across_instances(
+        _ctx(), model="res.partner", domain=[["credit_limit", ">", 1000]]
+    )
+    assert "acme" in out["errors"]
+    assert "credit_limit" in out["errors"]["acme"]
+    assert "1000" not in out["errors"]["acme"]
+    # globex has no rule of its own, so the same read still answers there.
+    assert "globex" in out["results"]
+
+
+def test_aggregate_across_refuses_a_domain_only_narrowing(monkeypatch, tmp_path):
+    _deny_credit_limit_for_acme(monkeypatch, tmp_path)
+    _patch_instances(monkeypatch)
+    out = server.aggregate_across_instances(
+        _ctx(),
+        model="res.partner",
+        group_by=["country_id"],
+        measures=["id:count"],
+        domain=[["credit_limit", ">", 0]],
+    )
+    assert "acme" in out["errors"]
+    assert "credit_limit" in out["errors"]["acme"]
+    assert "globex" in out["results"]
+
+
+def test_search_across_still_answers_an_allowed_domain(monkeypatch, tmp_path):
+    _deny_credit_limit_for_acme(monkeypatch, tmp_path)
+    _patch_instances(monkeypatch)
+    out = server.search_across_instances(
+        _ctx(), model="res.partner", domain=[["name", "ilike", "partner"]]
+    )
+    assert out["errors"] == {}
+    assert out["merged_count"] == 2
