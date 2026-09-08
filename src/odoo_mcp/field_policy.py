@@ -49,30 +49,45 @@ SUBDOMAIN_OPERATORS = frozenset({"any", "not any", "any!", "not any!"})
 MAX_DOMAIN_DEPTH = 8
 
 
+class DomainTooDeepError(ValueError):
+    """Raised when a domain nests past :data:`MAX_DOMAIN_DEPTH` (fail closed)."""
+
+
 def _domain_field_segments(domain: Any, _depth: int = 0) -> List[str]:
-    """First path segment of every field a domain filters on.
+    """Every path segment of every field a domain filters on.
 
     Walks the domain recursively so a field hidden inside an ``any`` /
-    ``not any`` sub-domain is seen too, and keeps only the first segment of a
-    dotted path (``employee_id.name`` -> ``employee_id``) because that is the
-    field the policy is keyed on. Logic operators (``&``, ``|``, ``!``) carry
-    no field name.
+    ``not any`` sub-domain is seen too, and keeps **every** segment of a
+    dotted path (``workorder_id.time_ids.employee_cost`` -> ``workorder_id``,
+    ``time_ids``, ``employee_cost``). Odoo 17+ rewrites ``a.b.c op v`` into
+    ``a any (b any (c op v))``, so the dotted and the ``any``-chain spellings
+    are the same query; attributing every segment to the outer model is what
+    makes the two forms check alike. Logic operators (``&``, ``|``, ``!``)
+    carry no field name.
 
-    Sub-domain leaves are attributed to the *same* model rather than to the
-    related model: resolving the comodel would need an Odoo read, and
-    over-refusing is the fail-closed direction.
+    Segments past the first, like sub-domain leaves, are attributed to the
+    *same* model rather than to the related model: resolving the comodel
+    would need an Odoo read, and over-refusing is the fail-closed direction.
+    The accepted cost is that an open field on a related model is refused
+    when the outer model denies a field of that name.
+
+    Raises :class:`DomainTooDeepError` past :data:`MAX_DOMAIN_DEPTH` instead
+    of returning the segments found so far: a padded chain would otherwise
+    hide a denied leaf below the cap and pass unchecked.
     """
+    if _depth > MAX_DOMAIN_DEPTH:
+        raise DomainTooDeepError(
+            f"domain nesting exceeds {MAX_DOMAIN_DEPTH} levels"
+        )
     segments: List[str] = []
-    if _depth > MAX_DOMAIN_DEPTH or not isinstance(domain, (list, tuple)):
+    if not isinstance(domain, (list, tuple)):
         return segments
     for leaf in domain:
         if isinstance(leaf, str) or not isinstance(leaf, (list, tuple)):
             continue
         if len(leaf) == 3 and isinstance(leaf[0], str):
             name, operator, value = leaf
-            head = name.split(".", 1)[0].strip()
-            if head:
-                segments.append(head)
+            segments.extend(s.strip() for s in name.split(".") if s.strip())
             if (
                 isinstance(operator, str)
                 and operator.strip().lower() in SUBDOMAIN_OPERATORS
@@ -213,9 +228,25 @@ class FieldPolicy:
         Fails closed, reads nothing from Odoo, and names only the model and
         the field names -- never a value carried in the domain, which may be
         the very record content the rule withholds. An empty ``allow`` list
-        therefore refuses every domain except one over ``id``.
+        therefore refuses every domain except one over ``id``. A domain that
+        nests past :data:`MAX_DOMAIN_DEPTH` is refused outright rather than
+        checked to the cap and passed, because the segments below the cap are
+        exactly where a padded chain would hide a denied leaf.
+
+        Models no rule applies to are pass-through, depth included: with no
+        policy file this method is inert, which is the upgrade guarantee.
         """
-        segments = _domain_field_segments(domain)
+        if self._effective(instance, model) is None:
+            return None
+        try:
+            segments = _domain_field_segments(domain)
+        except DomainTooDeepError:
+            return (
+                f"Field policy cannot check this domain on {model}: its "
+                f"nesting exceeds {MAX_DOMAIN_DEPTH} levels, so a denied "
+                "field could be hidden below the limit. The domain is "
+                "refused rather than passed unchecked; flatten it and retry."
+            )
         if not segments:
             return None
         _, redacted = self.filter_fields(instance, model, segments)

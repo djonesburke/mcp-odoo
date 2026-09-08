@@ -224,11 +224,23 @@ def test_check_domain_blocks_a_denied_leaf():
     )
 
 
-def test_check_domain_takes_the_first_segment_of_a_dotted_path():
-    """``employee_id.name`` reaches the same field through the relation."""
+def test_check_domain_takes_every_segment_of_a_dotted_path():
+    """Every segment is checked, not only the head.
+
+    ``employee_id.name`` reaches the denied field through the relation, and a
+    longer path can hop *back* to the model being read, so a denied name
+    anywhere along the path refuses the domain. Odoo 17+ rewrites
+    ``a.b.c op v`` into ``a any (b any (c op v))``, which this module already
+    refused; the two spellings are one query and must check alike.
+    """
     policy = make({"default": {"hr.leave": {"deny": ["employee_id"]}}})
     err = policy.check_domain(
         "default", "hr.leave", [["employee_id.name", "ilike", "somebody"]]
+    )
+    assert err is not None and "employee_id" in err
+    # The denied segment is in the middle of the path, not at its head.
+    err = policy.check_domain(
+        "default", "hr.leave", [["holiday_status_id.employee_id.name", "=", 7]]
     )
     assert err is not None and "employee_id" in err
 
@@ -822,3 +834,100 @@ def test_the_cash_aggregate_the_rulings_leave_open_is_still_open(shipped):
         )
         is None
     )
+
+
+# --- B-1: the dotted spelling of a sub-domain, and the depth cap -----------
+#
+# Second adversarial review, 2026-09-08 (finding B-1). check_domain refused
+# the `any`-chain spelling of a loop-back query but passed the dotted one,
+# and returned an empty segment list past MAX_DOMAIN_DEPTH -- so on the two
+# models the rulings closed, a denied field was still usable as a filter in
+# one call. Every segment of a dotted path is now attributed to the outer
+# model, and an over-deep domain is refused rather than checked to the cap.
+
+
+def test_shipped_policy_refuses_a_dotted_loop_back_to_denied_productivity_cost(
+    shipped,
+):
+    """The productivity model, reached back through its own work order.
+
+    ``workorder_id.time_ids`` returns to mrp.workcenter.productivity, so
+    ``workorder_id.time_ids.employee_cost > X`` filtered to one person is a
+    threshold question about a denied stored column, answered by the row
+    count alone. Written as ``workorder_id any (time_ids any (employee_cost
+    ...))`` it was already refused; the dotted form was not.
+    """
+    err = shipped.check_domain(
+        "default",
+        "mrp.workcenter.productivity",
+        [
+            ["employee_id", "=", 7],
+            ["workorder_id.time_ids.employee_cost", ">", 30],
+        ],
+    )
+    assert err is not None
+    assert "mrp.workcenter.productivity" in err and "employee_cost" in err
+
+
+def test_shipped_policy_refuses_a_dotted_loop_back_to_denied_analytic_fields(
+    shipped,
+):
+    """The analytic model, reached back through its own account.
+
+    ``account_id.line_ids`` returns to account.analytic.line, so both of
+    these ask about a field denied on the model being read: the labour-row
+    description and the person link.
+    """
+    err = shipped.check_domain(
+        "default",
+        "account.analytic.line",
+        [["account_id.line_ids.name", "ilike", "somebody"], ["date", "=", "2026-01-02"]],
+    )
+    assert err is not None
+    assert "account.analytic.line" in err and "name" in err
+
+    err = shipped.check_domain(
+        "default",
+        "account.analytic.line",
+        [["account_id.line_ids.employee_id", "=", 7]],
+    )
+    assert err is not None and "employee_id" in err
+
+
+def test_check_domain_refuses_a_domain_nested_past_the_depth_cap(shipped):
+    """Padding a chain past MAX_DOMAIN_DEPTH must not buy a pass.
+
+    Nine alternating ``any`` levels put ``employee_id`` below the cap, where
+    the walk used to stop and return what it had -- nothing denied. Odoo
+    collapses the chain to the one-level loop-back and answers it, so the
+    only safe reading of a domain the policy cannot walk to the bottom is a
+    refusal.
+    """
+    domain = [["employee_id", "=", 7]]
+    for step in range(9):
+        field = "account_id" if step % 2 == 0 else "line_ids"
+        domain = [[field, "any", domain]]
+    err = shipped.check_domain("default", "account.analytic.line", domain)
+    assert err is not None
+    assert "account.analytic.line" in err
+    assert str(field_policy.MAX_DOMAIN_DEPTH) in err
+    # No domain value is echoed back, on this path either.
+    assert "7" not in err.replace(str(field_policy.MAX_DOMAIN_DEPTH), "")
+    # An unpoliced model stays pass-through, depth included: no policy file,
+    # no behaviour change.
+    assert FieldPolicy({}).check_domain("default", "account.analytic.line", domain) is None
+
+
+def test_every_segment_attribution_over_refuses_a_far_model_field(shipped):
+    """The accepted cost of attributing every segment to the outer model.
+
+    ``partner_id.name`` on account.analytic.line asks for the *partner's*
+    name, which no ruling denied -- but ``name`` is denied on the model being
+    read, and resolving the comodel would need an Odoo read on the refusal
+    path. So it is refused. Over-refusing is the fail-closed direction and
+    this test is the honest statement of what it costs.
+    """
+    err = shipped.check_domain(
+        "default", "account.analytic.line", [["partner_id.name", "ilike", "acme"]]
+    )
+    assert err is not None and "name" in err

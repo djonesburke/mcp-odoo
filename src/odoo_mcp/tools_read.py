@@ -444,7 +444,18 @@ def search_records(
                 instance_name, model, query_domain
             )
             if query_block is not None:
-                return {"success": False, "error": query_block}
+                # Say whose domain was refused: the caller passed free text,
+                # not this field, so an unprefixed message reads as their own
+                # `domain` being blocked.
+                return {
+                    "success": False,
+                    "error": (
+                        "The `query` free-text shortcut built a search domain "
+                        "from this model's searchable text fields, and that "
+                        f"domain is not permitted. {query_block} Drop `query` "
+                        "and pass an explicit `domain` over permitted fields."
+                    ),
+                }
             normalized_domain = query_domain + normalized_domain
         resolved_fields = resolve_read_fields(
             app_context, odoo, model, fields, instance_name

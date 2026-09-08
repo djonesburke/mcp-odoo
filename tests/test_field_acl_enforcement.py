@@ -558,3 +558,9 @@ def test_free_text_query_on_analytic_lines_refuses_instead_of_half_answering(
     assert out["success"] is False
     assert "account.analytic.line" in out["error"] and "name" in out["error"]
     assert client.calls == 0
+    # The refusal says whose domain it was. The caller passed free text, not
+    # a domain over `name`, so an unattributed message reads as their own
+    # `domain` being blocked and sends them looking in the wrong place
+    # (second adversarial review, 2026-09-08, finding S-6).
+    assert "query" in out["error"]
+    assert "searchable text fields" in out["error"]
