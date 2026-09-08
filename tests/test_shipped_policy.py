@@ -76,12 +76,18 @@ def test_masked_set_is_exactly_this(acl):
     hr.employee withholds -- and hr.leave, whose private_name is a free-text
     reason field.
 
-    2026-09-08 added seven more, on three rulings by the owner. Absence: the
-    three report models that mirror hr.leave, each carrying the employee
-    link, the dates, the type and the state on its own rows, plus
+    2026-09-08 added seven keys on three rulings by the owner, then three
+    more the same day: an adversarial review found two of those rulings
+    defeated on models nobody had listed, and the owner ruled on each.
+    Absence: the three report models that mirror hr.leave, each carrying the
+    employee link, the dates, the type and the state on its own rows, plus
     resource.calendar.leaves, which is the same data wearing the
-    company-closure calendar's clothes. Derived pay: account.analytic.line.
-    Cash position: account.bank.statement and account.journal.
+    company-closure calendar's clothes. Derived pay: account.analytic.line,
+    and mrp.workcenter.productivity, which stores the person's hourly cost
+    outright rather than leaving it to be derived. Cash position:
+    account.bank.statement and account.journal, plus the two presentations
+    the review found still one call away -- account.account.current_balance
+    and account.bank.statement.line.running_balance.
     """
     assert set(acl) == {
         "*",
@@ -100,7 +106,10 @@ def test_masked_set_is_exactly_this(acl):
         "account.move",
         "account.batch.payment",
         "account.analytic.line",
+        "mrp.workcenter.productivity",
         "account.bank.statement",
+        "account.bank.statement.line",
+        "account.account",
         "account.journal",
         "res.partner",
     }
@@ -202,13 +211,7 @@ def test_closure_calendar_hides_the_person_not_the_closure(acl):
 
 
 def test_person_key_fields_are_denied_on_analytic_lines(acl):
-    """Ruling: deny employee_id on analytic lines.
-
-    Named for what it proves. The 2026-09-08 review showed the rate still
-    reachable on this model through ``name`` (mrp_workorder_hr_account writes
-    "[EMPL] <work order> - <employee>" into it) and directly on
-    mrp.workcenter.productivity.employee_cost -- both open decisions for
-    Dalton, so this test claims only that the ruling's fields are denied.
+    """Ruling: deny employee_id on analytic lines, plus the 2026-09-08 follow-up.
 
     employee_id plus unit_amount plus amount on one row is a rate per person
     per hour, one division away, and hr.version.wage being masked does not
@@ -221,22 +224,64 @@ def test_person_key_fields_are_denied_on_analytic_lines(acl):
     achieve that: user_id names the same person through res.users, and
     job_title is a related field reaching the hr.employee field the
     hr.employee whitelist already withholds.
+
+    name and display_name were added on 2026-09-08 after the adversarial
+    review (B1) showed the ruling defeated on this very model:
+    mrp_workorder_hr_account writes "[EMPL] <work order> - <employee>" into
+    ``name``, so the description carries the person even with every id field
+    denied, and an analytic line's display_name is its name. Dalton took the
+    trade-off knowingly -- every analytic-line description now disappears for
+    every holder of the org bundle, not only the labour ones. That cost is
+    the reason this is a ruling and not a fix, and the reason it is pinned
+    here: re-opening it is a decision, not a cleanup.
     """
     denied = set(acl["account.analytic.line"]["deny"])
-    assert denied == {"employee_id", "user_id", "job_title", "manager_id"}
+    assert denied == {
+        "employee_id",
+        "user_id",
+        "job_title",
+        "manager_id",
+        "name",
+        "display_name",
+    }
     assert "amount" not in denied and "unit_amount" not in denied, (
         "cost analytics stay readable; it is the per-person attribution that "
         "was ruled out, not the cost"
     )
 
 
-def test_cash_position_is_denied(acl):
+def test_workcenter_productivity_denies_the_rate_not_the_work(acl):
+    """Ruling 2026-09-08: deny employee_cost and total_cost, nothing else.
+
+    mrp_workorder stores employee_cost on this model as the employee's own
+    hourly_cost when one is set, falling back to the workcenter rate -- so it
+    is the rate itself, not a figure derived from hours and money on the same
+    row. total_cost is that rate times duration, which gives it back.
+
+    employee_id and duration stay readable on purpose: who worked which work
+    order and for how long is ops data Purchasing and production legitimately
+    read, and the ruling was about the money on the row.
+    """
+    rule = acl.get("mrp.workcenter.productivity")
+    assert rule is not None, "the stored per-person hourly cost is unmasked"
+    assert set(rule["deny"]) == {"employee_cost", "total_cost"}
+    for readable in ("employee_id", "duration", "workorder_id", "workcenter_id"):
+        assert readable not in rule["deny"], (
+            f"{readable} is how work is attributed to a work order; the ruling "
+            "denied the rate, not the record of the work"
+        )
+
+
+def test_cash_position_presentations_are_denied(acl):
     """Ruling: narrow Burke's cash position to the owner and Accounting.
 
-    This file has no per-seat notion -- field_acl is keyed on Odoo instance
-    and the policy ships inside the published bundle -- so the narrowing is a
-    deny on the shared org policy. Restoring these reads for those two seats
-    means a second bundle, not a role system invented here.
+    Named "presentations", because that is all a field rule can deny. This
+    file has no per-seat notion -- field_acl is keyed on Odoo instance and the
+    policy ships inside the published bundle -- so the narrowing is a deny on
+    the shared org policy. Restoring these reads for those two seats means a
+    second policy file and bundle, which is separate work in
+    burke-mcp-deploy and has to land first if the ruling is to mean "narrow"
+    rather than "deny to all".
 
     The journal half is the half that matters and was nearly missed.
     account.bank.statement carries the three balances the survey named, but
@@ -245,9 +290,16 @@ def test_cash_position_is_denied(acl):
     outstanding-payment balance as formatted currency -- verified read-only
     against production 2026-09-08, returned in full with redacted_fields
     null. Denying the statement model alone would have left the whole cash
-    position readable in one call on the journal, which is the same
-    reachable-by-another-path fault the wildcard exists for, in a field a
-    field-name rule cannot generalise about.
+    position readable in one call on the journal.
+
+    The 2026-09-08 review (B5) then found two more one-call paths, and the
+    owner ruled both denied: account.account.current_balance on asset_cash
+    accounts, which the ops lane reads on production daily, and
+    account.bank.statement.line.running_balance, whose latest row is the bank
+    balance. What stays open is the aggregate -- a balance:sum over
+    account.move.line filtered to asset_cash accounts reaches the same figure
+    through a domain over account_id, which is not a denied field -- so this
+    test still claims presentations, not the cash position.
     """
     assert set(acl["account.bank.statement"]["deny"]) == {
         "balance_start",
@@ -259,6 +311,12 @@ def test_cash_position_is_denied(acl):
         "kanban_dashboard",
         "kanban_dashboard_graph",
     }
+    assert set(acl["account.bank.statement.line"]["deny"]) == {"running_balance"}
+    assert set(acl["account.account"]["deny"]) == {"current_balance"}
+    assert "balance" not in acl.get("account.move.line", {}).get("deny", []), (
+        "the general ledger stays open by decision; denying balance here "
+        "would be a new ruling, not the 2026-09-08 one"
+    )
 
 
 def test_absence_is_not_in_the_public_employee_whitelist(acl):
@@ -331,6 +389,19 @@ def test_wildcard_is_exactly_this_set(acl):
     to it read from account.analytic.line, hr.leave.report or
     resource.calendar.leaves, because the policy filters the model being read,
     not the model on the far end of the relation.
+
+    display_name was considered for this set on 2026-09-08, when name and
+    display_name were denied on account.analytic.line, and deliberately kept
+    out. The two entries above are distinctive names that mean one data class
+    wherever Odoo puts them; display_name means "the label" on every model
+    there is, so a wildcard entry would take every many2one label on the
+    connector with it -- a company-wide outage, not a narrowing, and exactly
+    the accident the paragraph above says this test exists to catch. The
+    relation leak it would have closed barely exists here: the only many2one
+    to account.analytic.line in the Odoo 19 enterprise tree is timesheet_id
+    on hr.timesheet.stop.timer.confirmation.wizard, a transient with no
+    stored rows to search, and an x2many such as analytic_line_ids returns
+    ids rather than labels.
     """
     rule = acl.get("*")
     assert rule is not None, (

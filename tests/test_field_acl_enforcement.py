@@ -2,6 +2,7 @@
 
 import importlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -377,3 +378,183 @@ def test_search_records_refuses_a_dotted_path_to_a_denied_field(deny_credit_limi
     )
     assert out["success"] is False
     assert "credit_limit" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# The policy this repo actually ships, driven through the real tools.
+#
+# tests/test_shipped_policy.py pins the file's shape and tests/test_field_policy.py
+# pins filter_fields against it. Neither proves a tool call is what applies it, and
+# the 2026-09-08 rulings all landed on models a curated tool or a free-text shortcut
+# can reach. These go through server.search_records / aggregate_records with the real
+# file loaded, so the assertion is "the key did not reach the caller", not "the rule
+# is present".
+# ---------------------------------------------------------------------------
+
+SHIPPED_POLICY_PATH = Path(__file__).resolve().parent.parent / "odoo_mcp_policy.json"
+
+
+class ShippedClient:
+    """Rows shaped like the ones the 2026-09-08 rulings withhold.
+
+    Every value is a placeholder -- 1.0, "somebody" -- because the tests
+    assert on field *names* never reaching the caller. No Burke figure and no
+    real name belongs in a fixture.
+    """
+
+    _ROWS = {
+        "account.analytic.line": [
+            {
+                "id": 31,
+                "date": "2026-09-01",
+                "amount": -1.0,
+                "unit_amount": 1.0,
+                "name": "[EMPL] WO/0001 - somebody",
+                "display_name": "[EMPL] WO/0001 - somebody",
+            }
+        ],
+        "mrp.workcenter.productivity": [
+            {
+                "id": 41,
+                "duration": 60.0,
+                "employee_id": [7, "somebody"],
+                "employee_cost": 1.0,
+                "total_cost": 1.0,
+            }
+        ],
+        "account.account": [
+            {
+                "id": 11,
+                "code": "1010",
+                "account_type": "asset_cash",
+                "current_balance": 1.0,
+            }
+        ],
+        "account.bank.statement.line": [
+            {"id": 21, "date": "2026-09-01", "amount": 1.0, "running_balance": 2.0}
+        ],
+    }
+
+    # Enough metadata for the free-text query shortcut to pick a text field.
+    _FIELDS = {
+        "name": {"type": "char", "string": "Description", "searchable": True},
+    }
+
+    def __init__(self):
+        self.calls = 0
+
+    def search_read(self, model_name=None, fields=None, **kwargs):
+        self.calls += 1
+        rows = self._ROWS[model_name]
+        if fields is None:
+            return [dict(row) for row in rows]
+        wanted = set(fields) | {"id"}
+        return [{k: v for k, v in row.items() if k in wanted} for row in rows]
+
+    def get_model_fields(self, model):
+        return dict(self._FIELDS)
+
+
+@pytest.fixture
+def shipped_policy(monkeypatch):
+    """Load the vendored odoo_mcp_policy.json, not a fixture policy."""
+    monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(SHIPPED_POLICY_PATH))
+    monkeypatch.setattr(server, "resolve_instance_name", lambda name: name or "default")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    reset_field_policy()
+    yield
+    reset_field_policy()
+
+
+@pytest.mark.parametrize(
+    "model,fields,denied",
+    [
+        (
+            "account.analytic.line",
+            ["date", "amount", "unit_amount", "name", "display_name"],
+            ["display_name", "name"],
+        ),
+        (
+            "mrp.workcenter.productivity",
+            ["duration", "employee_cost", "total_cost"],
+            ["employee_cost", "total_cost"],
+        ),
+        (
+            "account.account",
+            ["code", "account_type", "current_balance"],
+            ["current_balance"],
+        ),
+        (
+            "account.bank.statement.line",
+            ["date", "amount", "running_balance"],
+            ["running_balance"],
+        ),
+    ],
+)
+def test_shipped_policy_strips_the_ruled_fields_through_search_records(
+    shipped_policy, model, fields, denied
+):
+    client = ShippedClient()
+    out = server.search_records(FakeCtx(client), model=model, fields=fields)
+    assert out["success"] is True
+    assert client.calls == 1
+    for row in out["result"]:
+        for field in denied:
+            assert field not in row, f"{field} reached the caller on {model}"
+    assert out["redacted_fields"] == denied
+
+
+@pytest.mark.parametrize(
+    "model,field",
+    [
+        ("account.analytic.line", "name"),
+        ("mrp.workcenter.productivity", "employee_cost"),
+        ("account.account", "current_balance"),
+        ("account.bank.statement.line", "running_balance"),
+    ],
+)
+def test_shipped_policy_refuses_a_domain_over_a_ruled_field(
+    shipped_policy, model, field
+):
+    """Redacting the column leaves the filter; the filter is the same question."""
+    client = ShippedClient()
+    out = server.search_records(
+        FakeCtx(client), model=model, domain=[[field, "!=", False]], fields=["id"]
+    )
+    assert out["success"] is False
+    assert field in out["error"] and model in out["error"]
+    assert client.calls == 0, "the refusal must happen before Odoo is read"
+
+
+def test_shipped_policy_refuses_a_cash_balance_aggregate(shipped_policy):
+    """The measure is the denied field, so check_aggregate answers first."""
+    out = server.aggregate_records(
+        FakeCtx(ShippedClient()),
+        model="account.account",
+        group_by=["account_type"],
+        measures=["current_balance:sum"],
+    )
+    assert out["success"] is False
+    assert "current_balance" in out["error"]
+
+
+def test_free_text_query_on_analytic_lines_refuses_instead_of_half_answering(
+    shipped_policy,
+):
+    """The one shipped read path the ``name`` deny changes, and how it degrades.
+
+    ``query`` is a server-side shortcut: it builds an OR ilike domain from the
+    model's searchable text fields, and on account.analytic.line that is
+    ``name`` -- now denied. The tool refuses, naming the model and the field,
+    rather than quietly searching a narrower set of columns and returning a
+    partial answer that looks complete. Nothing else in src/ reads any field
+    these rulings denied (grepped 2026-09-08), so this is the whole blast
+    radius inside the server.
+    """
+    client = ShippedClient()
+    out = server.search_records(
+        FakeCtx(client), model="account.analytic.line", query="EMPL", fields=["id"]
+    )
+    assert out["success"] is False
+    assert "account.analytic.line" in out["error"] and "name" in out["error"]
+    assert client.calls == 0

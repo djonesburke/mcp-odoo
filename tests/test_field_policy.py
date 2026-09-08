@@ -550,13 +550,14 @@ def test_leave_relations_are_redacted_wherever_they_appear(shipped, model):
 def test_person_key_fields_are_denied_on_analytic_lines(shipped):
     """employee + hours + cost on one row is a rate one division away.
 
-    Named for what it proves, not for what it would be nice to have proved.
-    The 2026-09-08 review (B1) showed the rate is still reachable on this very
+    The 2026-09-08 review (B1) showed the rate still reachable on this very
     model through ``name`` -- ``mrp_workorder_hr_account`` writes the employee
-    name into it as ``[EMPL] <work order> - <employee>`` -- and directly on
-    ``mrp.workcenter.productivity.employee_cost`` (B2). Both are open
-    decisions for Dalton, so this test pins the person-key fields the ruling
-    named and claims nothing about computability.
+    name into it as ``[EMPL] <work order> - <employee>`` -- and Dalton ruled
+    ``name`` and ``display_name`` denied the same day, knowing it costs every
+    analytic-line description on the org bundle. amount and unit_amount stay:
+    they are cost analytics, and denying them company-wide would break
+    accounting. So a labour line still returns its hours and its money; what
+    it no longer returns is any column that says whose they are.
     """
     kept, redacted = shipped.filter_fields(
         "default",
@@ -571,19 +572,49 @@ def test_person_key_fields_are_denied_on_analytic_lines(shipped):
             "user_id",
             "job_title",
             "manager_id",
+            "name",
+            "display_name",
         ],
     )
     assert kept == ["id", "date", "amount", "unit_amount", "account_id"]
     assert sorted(redacted) == [
+        "display_name",
         "employee_id",
         "job_title",
         "manager_id",
+        "name",
         "user_id",
     ]
 
 
-def test_cash_position_presentations_are_denied_on_both_models(shipped):
-    """Two models carry it, and the journal one is a JSON blob.
+def test_workcenter_rate_is_denied_but_the_work_is_not(shipped):
+    """The one model that stores the hourly cost rather than implying it.
+
+    mrp_workorder computes employee_cost from the employee's own hourly_cost
+    when one is set, and stores it on the productivity row along with
+    total_cost -- so ruling 2 was defeated here without any division at all
+    (2026-09-08 review, B2). Dalton denied both figures and kept employee_id
+    and duration, because who worked which work order for how long is ops
+    data and it was the money that was ruled out.
+    """
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "mrp.workcenter.productivity",
+        [
+            "id",
+            "employee_id",
+            "workorder_id",
+            "duration",
+            "employee_cost",
+            "total_cost",
+        ],
+    )
+    assert kept == ["id", "employee_id", "workorder_id", "duration"]
+    assert sorted(redacted) == ["employee_cost", "total_cost"]
+
+
+def test_cash_position_presentations_are_denied_on_four_models(shipped):
+    """Four models carry it, and one of them is a JSON blob.
 
     account.journal.kanban_dashboard is computed text carrying the account
     balance, the last statement balance and the outstanding-payment balance
@@ -592,11 +623,14 @@ def test_cash_position_presentations_are_denied_on_both_models(shipped):
     account.bank.statement would have looked complete and left the cash
     position one call away.
 
-    "Presentations", not "the cash position": the 2026-09-08 review (B5)
-    showed account.account.current_balance on asset_cash accounts,
-    account.bank.statement.line.running_balance and a balance:sum aggregate
-    over account.move.line all still answer the same question for every seat.
-    Whether to deny them is Dalton's call, not this test's claim.
+    The 2026-09-08 review (B5) found two further one-call paths --
+    account.account.current_balance on asset_cash accounts, read on
+    production daily by the ops lane, and
+    account.bank.statement.line.running_balance -- and Dalton ruled both
+    denied. Still "presentations", not "the cash position": a balance:sum
+    aggregate over account.move.line filtered to asset_cash accounts reaches
+    the same figure through a domain over account_id, which nothing denies,
+    and that is pinned open below.
     """
     kept, redacted = shipped.filter_fields(
         "default",
@@ -621,6 +655,22 @@ def test_cash_position_presentations_are_denied_on_both_models(shipped):
     assert kept == ["id", "name", "type"]
     assert sorted(redacted) == ["current_statement_balance", "kanban_dashboard"]
 
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "account.account",
+        ["id", "code", "name", "account_type", "current_balance"],
+    )
+    assert kept == ["id", "code", "name", "account_type"]
+    assert redacted == ["current_balance"]
+
+    kept, redacted = shipped.filter_fields(
+        "default",
+        "account.bank.statement.line",
+        ["id", "date", "amount", "payment_ref", "running_balance"],
+    )
+    assert kept == ["id", "date", "amount", "payment_ref"]
+    assert redacted == ["running_balance"]
+
 
 @pytest.mark.parametrize(
     "model,fields",
@@ -638,10 +688,10 @@ def test_wildcard_did_not_close_the_deliberately_open_fields(shipped, model, fie
 
     account.analytic.line is still deliberately NOT in this list, and now for
     a settled reason rather than an open one: the owner ruled on 2026-09-08
-    that employee_id is denied there. Its amount and unit_amount are pinned as
-    open by test_person_key_fields_are_denied_on_analytic_lines instead, which
-    is where that trade-off now lives -- along with the residual paths that
-    keep the per-employee rate reachable until Dalton rules on them."""
+    that employee_id is denied there, and later the same day that name and
+    display_name are too. Its amount and unit_amount are pinned as open by
+    test_person_key_fields_are_denied_on_analytic_lines instead, which is
+    where that trade-off lives."""
     kept, redacted = shipped.filter_fields("default", model, fields)
     assert kept == fields and redacted == []
 
@@ -709,3 +759,66 @@ def test_shipped_wildcard_denies_holiday_id_as_a_filter(shipped):
         "default", "account.analytic.line", [["holiday_id", "!=", False]]
     )
     assert err is not None and "holiday_id" in err
+
+
+@pytest.mark.parametrize(
+    "model,field",
+    [
+        ("account.analytic.line", "name"),
+        ("account.analytic.line", "display_name"),
+        ("mrp.workcenter.productivity", "employee_cost"),
+        ("mrp.workcenter.productivity", "total_cost"),
+        ("account.account", "current_balance"),
+        ("account.bank.statement.line", "running_balance"),
+    ],
+)
+def test_shipped_policy_refuses_a_domain_over_the_2026_09_08_denials(
+    shipped, model, field
+):
+    """A denied column is a denied question, on the fields ruled that day.
+
+    Every read below returns nothing but open columns -- an id, a date, an
+    amount -- so output redaction lets it through untouched. The domain is
+    what turns it into an answer about the denied field: ``name ilike
+    '[EMPL]'`` on analytic lines isolates the labour rows whose description
+    names a person, and ``current_balance > 0`` bisects a balance without
+    ever selecting it. check_domain is what refuses them (review finding B3).
+    """
+    err = shipped.check_domain("default", model, [[field, "!=", False]])
+    assert err is not None, f"a domain over {field} on {model} was allowed"
+    assert model in err and field in err
+
+
+def test_shipped_policy_refuses_a_dotted_domain_into_a_denied_analytic_field(
+    shipped,
+):
+    """The dotted path is not a way round it either."""
+    err = shipped.check_domain(
+        "default", "account.analytic.line", [["name", "ilike", "[EMPL] WO"]]
+    )
+    assert err is not None and "name" in err
+
+
+def test_the_cash_aggregate_the_rulings_leave_open_is_still_open(shipped):
+    """Pinned as open so nobody reads the four denies as more than they are.
+
+    balance:sum over account.move.line, filtered by account_id to the cash
+    accounts, reaches the same figure. account_id is not denied on that
+    model, so check_domain does not refuse it and check_aggregate does not
+    either. If that is ever closed it will be a new ruling; until then this
+    test is the honest statement of what ruling 3 achieved.
+    """
+    assert (
+        shipped.check_domain(
+            "default",
+            "account.move.line",
+            [["account_id.account_type", "=", "asset_cash"]],
+        )
+        is None
+    )
+    assert (
+        shipped.check_aggregate(
+            "default", "account.move.line", ["account_id", "balance"]
+        )
+        is None
+    )
