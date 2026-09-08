@@ -70,11 +70,20 @@ withheld, so it does not hallucinate their absence or values.
 ## Limits (read this)
 
 - **Curated tools are not field-redacted.** `search_employee` and
-  `search_holidays` return a fixed, curated projection of non-sensitive
-  identity/calendar fields (e.g. employee id + name). They never return
-  arbitrary stored fields, so they are outside the redaction path by design.
+  `search_holidays` return a fixed, curated projection of
+  identity/calendar fields. They never return arbitrary stored fields, so
+  they are outside the *redaction* path by design — a fixed projection with
+  required fields cannot be answered field by field.
   Put sensitive employee fields behind a `deny`/`allow` on `hr.employee` and
   read them through `read_record`/`search_records`, which are enforced.
+  **`search_holidays` does, however, fail closed.** Its projection is the
+  employee link, the dates, the description and the state of a named person's
+  time off, which is squarely the kind of thing a policy on `hr.leave` is
+  written to withhold — so before reading, it asks the policy whether any
+  field it projects is restricted on `hr.leave.report.calendar`, and refuses
+  with an explanatory error if so. Being outside redaction is a design
+  choice; answering around the mask is not. With no policy file it behaves
+  exactly as before.
 - **`read_attachment`** returns attachment metadata + content. Field ACL
   applies to the metadata dict; it does not parse attachment *payloads*. Do
   not rely on it to redact secrets embedded inside attachment bytes.

@@ -3524,7 +3524,22 @@ def test_search_holidays_rejects_invalid_end_date():
     assert "end_date" in result.error
 
 
-def test_search_holidays_returns_results_with_employee_filter():
+def test_search_holidays_returns_results_with_employee_filter(monkeypatch, tmp_path):
+    """The projection parses. Deliberately run with no policy in scope.
+
+    The autouse fixture clears the policy environment variables, but policy
+    discovery also falls back to ./odoo_mcp_policy.json and pytest runs from
+    the repo root, where the shipped Burke policy lives -- so a test that does
+    not chdir runs against it. That was invisible while search_holidays
+    ignored the field policy altogether, and became visible on 2026-09-08 when
+    it started refusing on a restricted model: those two facts together are
+    the hole the refusal closes. This branch is about the projection, so it
+    gets an empty directory rather than an expectation about Burke's rules.
+    """
+    from odoo_mcp.field_policy import reset_field_policy
+
+    monkeypatch.chdir(tmp_path)
+    reset_field_policy()
     server = importlib.import_module("odoo_mcp.server")
 
     class _Client:
@@ -3548,9 +3563,15 @@ def test_search_holidays_returns_results_with_employee_filter():
     )
     assert result.success is True
     assert result.result[0].name == "Vacation"
+    reset_field_policy()
 
 
-def test_search_holidays_returns_error_on_search_failure():
+def test_search_holidays_returns_error_on_search_failure(monkeypatch, tmp_path):
+    """An RPC failure still surfaces. No policy in scope; see the test above."""
+    from odoo_mcp.field_policy import reset_field_policy
+
+    monkeypatch.chdir(tmp_path)
+    reset_field_policy()
     server = importlib.import_module("odoo_mcp.server")
 
     class _Client:
@@ -3562,6 +3583,7 @@ def test_search_holidays_returns_error_on_search_failure():
     )
     assert result.success is False
     assert "rpc" in result.error
+    reset_field_policy()
 
 
 # ----- prompt rendering -------------------------------------------------

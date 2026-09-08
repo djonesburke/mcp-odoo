@@ -773,6 +773,31 @@ def search_employee(
         return SearchEmployeeResponse(success=False, error=str(e))
 
 
+# search_holidays is a curated tool: it reads one model through the raw client
+# and returns a fixed projection, so it sits outside the field-ACL enforcement
+# path that search_records and read_record go through (docs/field-acl.md,
+# "Limits"). That is a documented design choice and harmless for a projection
+# of non-sensitive identity fields -- but this projection is the employee
+# link, the dates and the state of a named person's time off, which is exactly
+# what the field policy is asked to withhold on hr.leave and its report
+# models. A mask the tool does not consult is not a mask.
+#
+# Rather than redact a fixed projection field by field -- which would hand
+# back a Holiday object with required fields missing -- the tool asks the
+# policy whether it is allowed to answer at all, and refuses if not. With no
+# policy file, restricted_fields() returns nothing and behaviour is unchanged,
+# which keeps the upstream zero-friction guarantee intact.
+HOLIDAY_MODEL = "hr.leave.report.calendar"
+HOLIDAY_PROJECTION = [
+    "display_name",
+    "start_datetime",
+    "stop_datetime",
+    "employee_id",
+    "name",
+    "state",
+]
+
+
 @mcp.tool(
     description="Search for holidays within a date range",
     annotations=READ_ONLY_TOOL,
@@ -831,9 +856,24 @@ def search_holidays(
         )
 
     try:
-        _, odoo = _resolve_odoo(ctx, instance)
+        instance_name, odoo = _resolve_odoo(ctx, instance)
+        restricted = get_field_policy().restricted_fields(
+            instance_name, HOLIDAY_MODEL, HOLIDAY_PROJECTION
+        )
+        if restricted:
+            return SearchHolidaysResponse(
+                success=False,
+                error=(
+                    f"Field policy restricts {sorted(restricted)} on "
+                    f"{HOLIDAY_MODEL}. This tool returns a fixed projection "
+                    "that cannot be redacted field by field, so the request is "
+                    "refused rather than answered around the policy. Read "
+                    "time-off data through search_records/read_record, which "
+                    "are on the enforcement path."
+                ),
+            )
         holidays = odoo.search_read(
-            model_name="hr.leave.report.calendar",
+            model_name=HOLIDAY_MODEL,
             domain=domain,
         )
         parsed_holidays = [Holiday(**holiday) for holiday in holidays]

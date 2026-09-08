@@ -178,3 +178,94 @@ def test_health_check_reports_field_acl(deny_credit_limit):
     health = server.health_check()
     assert health["runtime"]["field_acl"]["active"] is True
     assert health["runtime"]["field_acl"]["instances_with_rules"] == 1
+
+
+# --- curated tools: the path a field mask does not reach --------------------
+
+
+class HolidayClient:
+    """Client whose search_read answers the search_holidays projection."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def search_read(self, model_name, domain, **kwargs):
+        self.calls += 1
+        return [
+            {
+                "display_name": "Holiday",
+                "start_datetime": "2024-01-01 00:00:00",
+                "stop_datetime": "2024-01-02 00:00:00",
+                "employee_id": [7, "Ada"],
+                "name": "Vacation",
+                "state": "validate",
+            }
+        ]
+
+
+@pytest.fixture
+def close_absence_model(monkeypatch, tmp_path):
+    """The shipped shape: hr.leave.report.calendar as an empty whitelist."""
+    pf = tmp_path / "fp.json"
+    pf.write_text(
+        json.dumps(
+            {"field_acl": {"default": {"hr.leave.report.calendar": {"allow": []}}}}
+        )
+    )
+    monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(pf))
+    monkeypatch.setattr(server, "resolve_instance_name", lambda name: name or "default")
+    monkeypatch.setattr(server, "resolve_default_instance_name", lambda: "default")
+    reset_field_policy()
+    yield
+    reset_field_policy()
+
+
+def test_search_holidays_refuses_when_the_policy_closes_the_model(close_absence_model):
+    """A curated tool must not answer around the mask it never consults.
+
+    search_holidays reads hr.leave.report.calendar through the raw client and
+    returns a fixed projection -- the employee link, the dates, the name and
+    the state of a named person's time off. Redaction never applied to it
+    (docs/field-acl.md, "Limits"), so masking hr.leave and its report models
+    in the policy file would have left this tool answering in full.
+
+    It refuses rather than redacts because the projection has required fields:
+    a partially-filled Holiday is not a thing this response model can carry,
+    and silently returning fewer rows would be worse than an error that says
+    why.
+    """
+    client = HolidayClient()
+    result = server.search_holidays(
+        FakeCtx(client), start_date="2024-01-01", end_date="2024-01-31"
+    )
+    assert result.success is False
+    assert "hr.leave.report.calendar" in result.error
+    assert "employee_id" in result.error
+    assert client.calls == 0, "the refusal must happen before Odoo is read"
+
+
+def test_search_holidays_is_unchanged_without_a_policy(monkeypatch, tmp_path):
+    """The upstream guarantee: no policy file, no behaviour change."""
+    monkeypatch.delenv("ODOO_MCP_FIELD_POLICY_FILE", raising=False)
+    monkeypatch.delenv("ODOO_MCP_POLICY_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    reset_field_policy()
+    try:
+        result = server.search_holidays(
+            FakeCtx(HolidayClient()), start_date="2024-01-01", end_date="2024-01-31"
+        )
+        assert result.success is True
+        assert result.result[0].name == "Vacation"
+    finally:
+        reset_field_policy()
+
+
+def test_search_holidays_still_answers_when_the_policy_spares_it(
+    deny_credit_limit,
+):
+    """A policy about other models does not disable a curated tool."""
+    result = server.search_holidays(
+        FakeCtx(HolidayClient()), start_date="2024-01-01", end_date="2024-01-31"
+    )
+    assert result.success is True
+    assert result.result[0].state == "validate"
