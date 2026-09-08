@@ -423,6 +423,13 @@ def search_records(
         if offset < 0:
             raise ValueError("offset must be greater than or equal to 0")
         normalized_domain = normalize_domain_input(domain)
+        # Field ACL: refuse a domain over a denied field before Odoo is read.
+        # Redacting the output alone leaves the filter as an inference channel.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model, normalized_domain
+        )
+        if domain_block is not None:
+            return {"success": False, "error": domain_block}
         query_fields_used: Optional[List[str]] = None
         if query is not None and str(query).strip():
             metadata = _cached_fields_metadata(
@@ -431,6 +438,24 @@ def search_records(
             query_domain, query_fields_used = build_text_query_domain(
                 query, metadata
             )
+            # The free-text shortcut builds its own domain from the model's
+            # searchable text fields, which can include a denied one.
+            query_block = get_field_policy().check_domain(
+                instance_name, model, query_domain
+            )
+            if query_block is not None:
+                # Say whose domain was refused: the caller passed free text,
+                # not this field, so an unprefixed message reads as their own
+                # `domain` being blocked.
+                return {
+                    "success": False,
+                    "error": (
+                        "The `query` free-text shortcut built a search domain "
+                        "from this model's searchable text fields, and that "
+                        f"domain is not permitted. {query_block} Drop `query` "
+                        "and pass an explicit `domain` over permitted fields."
+                    ),
+                }
             normalized_domain = query_domain + normalized_domain
         resolved_fields = resolve_read_fields(
             app_context, odoo, model, fields, instance_name
@@ -664,6 +689,14 @@ def aggregate_records(
         )
         if aggregate_block is not None:
             return {"success": False, "error": aggregate_block}
+        # The domain is the other half: group_by and measures can all be open
+        # fields while the domain narrows the rows to one denied value, which
+        # makes the aggregate itself the answer about that value.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model, normalized_domain
+        )
+        if domain_block is not None:
+            return {"success": False, "error": domain_block}
 
         major = odoo_major_version(odoo)
         method_used = "read_group"
@@ -773,6 +806,31 @@ def search_employee(
         return SearchEmployeeResponse(success=False, error=str(e))
 
 
+# search_holidays is a curated tool: it reads one model through the raw client
+# and returns a fixed projection, so it sits outside the field-ACL enforcement
+# path that search_records and read_record go through (docs/field-acl.md,
+# "Limits"). That is a documented design choice and harmless for a projection
+# of non-sensitive identity fields -- but this projection is the employee
+# link, the dates and the state of a named person's time off, which is exactly
+# what the field policy is asked to withhold on hr.leave and its report
+# models. A mask the tool does not consult is not a mask.
+#
+# Rather than redact a fixed projection field by field -- which would hand
+# back a Holiday object with required fields missing -- the tool asks the
+# policy whether it is allowed to answer at all, and refuses if not. With no
+# policy file, restricted_fields() returns nothing and behaviour is unchanged,
+# which keeps the upstream zero-friction guarantee intact.
+HOLIDAY_MODEL = "hr.leave.report.calendar"
+HOLIDAY_PROJECTION = [
+    "display_name",
+    "start_datetime",
+    "stop_datetime",
+    "employee_id",
+    "name",
+    "state",
+]
+
+
 @mcp.tool(
     description="Search for holidays within a date range",
     annotations=READ_ONLY_TOOL,
@@ -831,9 +889,24 @@ def search_holidays(
         )
 
     try:
-        _, odoo = _resolve_odoo(ctx, instance)
+        instance_name, odoo = _resolve_odoo(ctx, instance)
+        restricted = get_field_policy().restricted_fields(
+            instance_name, HOLIDAY_MODEL, HOLIDAY_PROJECTION
+        )
+        if restricted:
+            return SearchHolidaysResponse(
+                success=False,
+                error=(
+                    f"Field policy restricts {sorted(restricted)} on "
+                    f"{HOLIDAY_MODEL}. This tool returns a fixed projection "
+                    "that cannot be redacted field by field, so the request is "
+                    "refused rather than answered around the policy. Read "
+                    "time-off data through search_records/read_record, which "
+                    "are on the enforcement path."
+                ),
+            )
         holidays = odoo.search_read(
-            model_name="hr.leave.report.calendar",
+            model_name=HOLIDAY_MODEL,
             domain=domain,
         )
         parsed_holidays = [Holiday(**holiday) for holiday in holidays]

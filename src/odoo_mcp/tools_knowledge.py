@@ -91,6 +91,17 @@ def index_knowledge(
         instance_name, odoo = _resolve_odoo(ctx, instance)
         app_context = _app_context(ctx)
         normalized_domain = normalize_domain_input(domain)
+        # Field ACL: indexed output is redacted, but the domain choosing which
+        # rows get indexed is an inference channel in its own right.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model, normalized_domain
+        )
+        if domain_block is not None:
+            return {
+                "success": False,
+                "tool": "index_knowledge",
+                "error": domain_block,
+            }
         read_fields = resolve_read_fields(
             app_context, odoo, model, fields, instance_name
         )

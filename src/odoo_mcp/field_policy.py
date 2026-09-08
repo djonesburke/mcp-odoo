@@ -2,7 +2,10 @@
 
 Opt-in, per-instance, per-model field allow/deny rules applied to every path
 that returns record data: read tools, aggregate validation, the knowledge
-indexer, ``odoo://`` resources, and ``get_model_fields`` metadata.
+indexer, ``odoo://`` resources, and ``get_model_fields`` metadata. Denied
+fields are refused as *filters* as well as withheld as output
+(:meth:`FieldPolicy.check_domain`), because a domain over a denied field
+answers a question about it without ever returning the column.
 
 Design mirrors :mod:`write_policy`: env var -> JSON file -> validated,
 cached structure. No policy file means no behavior change (zero-friction
@@ -39,6 +42,61 @@ from .write_policy import policy_file_path
 FIELD_POLICY_FILE_ENV = "ODOO_MCP_FIELD_POLICY_FILE"
 FIELD_ACL_KEY = "field_acl"
 ALWAYS_KEPT = frozenset({"id"})
+
+# Domain leaves whose value is itself a domain over the related model.
+SUBDOMAIN_OPERATORS = frozenset({"any", "not any", "any!", "not any!"})
+# A domain is caller data; cap the walk rather than trust its nesting.
+MAX_DOMAIN_DEPTH = 8
+
+
+class DomainTooDeepError(ValueError):
+    """Raised when a domain nests past :data:`MAX_DOMAIN_DEPTH` (fail closed)."""
+
+
+def _domain_field_segments(domain: Any, _depth: int = 0) -> List[str]:
+    """Every path segment of every field a domain filters on.
+
+    Walks the domain recursively so a field hidden inside an ``any`` /
+    ``not any`` sub-domain is seen too, and keeps **every** segment of a
+    dotted path (``workorder_id.time_ids.employee_cost`` -> ``workorder_id``,
+    ``time_ids``, ``employee_cost``). Odoo 17+ rewrites ``a.b.c op v`` into
+    ``a any (b any (c op v))``, so the dotted and the ``any``-chain spellings
+    are the same query; attributing every segment to the outer model is what
+    makes the two forms check alike. Logic operators (``&``, ``|``, ``!``)
+    carry no field name.
+
+    Segments past the first, like sub-domain leaves, are attributed to the
+    *same* model rather than to the related model: resolving the comodel
+    would need an Odoo read, and over-refusing is the fail-closed direction.
+    The accepted cost is that an open field on a related model is refused
+    when the outer model denies a field of that name.
+
+    Raises :class:`DomainTooDeepError` past :data:`MAX_DOMAIN_DEPTH` instead
+    of returning the segments found so far: a padded chain would otherwise
+    hide a denied leaf below the cap and pass unchecked.
+    """
+    if _depth > MAX_DOMAIN_DEPTH:
+        raise DomainTooDeepError(
+            f"domain nesting exceeds {MAX_DOMAIN_DEPTH} levels"
+        )
+    segments: List[str] = []
+    if not isinstance(domain, (list, tuple)):
+        return segments
+    for leaf in domain:
+        if isinstance(leaf, str) or not isinstance(leaf, (list, tuple)):
+            continue
+        if len(leaf) == 3 and isinstance(leaf[0], str):
+            name, operator, value = leaf
+            segments.extend(s.strip() for s in name.split(".") if s.strip())
+            if (
+                isinstance(operator, str)
+                and operator.strip().lower() in SUBDOMAIN_OPERATORS
+            ):
+                segments.extend(_domain_field_segments(value, _depth + 1))
+            continue
+        # Any other nesting is treated as a domain in its own right.
+        segments.extend(_domain_field_segments(leaf, _depth + 1))
+    return segments
 
 
 class FieldPolicyError(ValueError):
@@ -152,6 +210,50 @@ class FieldPolicy:
             return (
                 "Field policy denies access to "
                 f"{sorted(redacted)} on {model}; aggregation on restricted "
+                "fields is blocked to prevent inference."
+            )
+        return None
+
+    def check_domain(self, instance: str, model: str, domain: Any) -> Optional[str]:
+        """Return an error string if a domain filters on a denied field.
+
+        Redacting the *output* of a read leaves the filter itself as an
+        inference channel: a domain on a denied field turns any column that
+        is still allowed -- or the row count on its own -- into an answer
+        about the denied one. One aggregate grouped by month and filtered to
+        a single employee is the per-person series; one count bisected over
+        dates is a named person's absence. Closing that is why this exists
+        (2026-09-08 adversarial review, finding B3).
+
+        Fails closed, reads nothing from Odoo, and names only the model and
+        the field names -- never a value carried in the domain, which may be
+        the very record content the rule withholds. An empty ``allow`` list
+        therefore refuses every domain except one over ``id``. A domain that
+        nests past :data:`MAX_DOMAIN_DEPTH` is refused outright rather than
+        checked to the cap and passed, because the segments below the cap are
+        exactly where a padded chain would hide a denied leaf.
+
+        Models no rule applies to are pass-through, depth included: with no
+        policy file this method is inert, which is the upgrade guarantee.
+        """
+        if self._effective(instance, model) is None:
+            return None
+        try:
+            segments = _domain_field_segments(domain)
+        except DomainTooDeepError:
+            return (
+                f"Field policy cannot check this domain on {model}: its "
+                f"nesting exceeds {MAX_DOMAIN_DEPTH} levels, so a denied "
+                "field could be hidden below the limit. The domain is "
+                "refused rather than passed unchecked; flatten it and retry."
+            )
+        if not segments:
+            return None
+        _, redacted = self.filter_fields(instance, model, segments)
+        if redacted:
+            return (
+                "Field policy denies access to "
+                f"{sorted(set(redacted))} on {model}; filtering on restricted "
                 "fields is blocked to prevent inference."
             )
         return None

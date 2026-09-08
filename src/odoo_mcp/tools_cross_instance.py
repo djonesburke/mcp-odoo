@@ -113,6 +113,11 @@ def run_search_across(app_context: Any, params: Dict[str, Any]) -> Dict[str, Any
     def worker(instance: str) -> List[Dict[str, Any]]:
         name, client = app_context.get_client(instance)
         _guard_rate(name, "search_across_instances")
+        # Field ACL: the rules are per instance, so the domain is checked
+        # inside the worker, before this instance is read.
+        block = get_field_policy().check_domain(name, model, domain)
+        if block is not None:
+            raise RuntimeError(block)
         records = client.search_read(model, domain, fields=fields, limit=limit)
         records, _ = get_field_policy().redact_records(name, model, list(records))
         return records
@@ -160,6 +165,9 @@ def run_aggregate_across(app_context: Any, params: Dict[str, Any]) -> Dict[str, 
         block = policy.check_aggregate(name, model, referenced)
         if block is not None:
             raise RuntimeError(block)
+        domain_block = policy.check_domain(name, model, domain)
+        if domain_block is not None:
+            raise RuntimeError(domain_block)
         return list(
             client.execute_method(
                 model, "read_group", domain, normalized_measures, group_by

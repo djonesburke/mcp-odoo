@@ -59,6 +59,7 @@ unprotected.
 | --- | --- |
 | `search_records`, `read_record` | Denied fields removed from each record; response gains `redacted_fields: [...]`. |
 | `aggregate_records` | Grouping or aggregating on a denied field is **rejected** with a clear error (prevents value inference). |
+| **Domains**, on every read path | Filtering on a denied field is **rejected** before Odoo is read, on `search_records`, `aggregate_records`, `index_knowledge`, `search_across_instances`, `aggregate_across_instances` and the `odoo://search/...` resource. Redacting the output alone leaves the filter as an inference channel: narrow the rows to one denied value and every column still returned -- or the bare row count -- answers a question about it. **Every segment** of a dotted path is checked against the model being read (`employee_id.name` is checked as `employee_id` *and* `name`), and `any` / `not any` sub-domains are walked the same way -- Odoo rewrites `a.b.c op v` into `a any (b any (c op v))`, so the two spellings are one query and must check alike. A domain nested past the walk's depth cap is **refused**, not checked to the cap and passed. |
 | `get_model_fields` | Denied fields are **marked** `"access": "restricted"` (not hidden) so the agent knows the field exists and can explain the redaction; `restricted_fields` listed. |
 | `index_knowledge` | Denied fields are excluded before BM25 indexing, so their values are never cached or searchable. |
 | `odoo://record/...`, `odoo://search/...` resources | Denied fields removed; `_redacted_fields` noted. |
@@ -70,11 +71,43 @@ withheld, so it does not hallucinate their absence or values.
 ## Limits (read this)
 
 - **Curated tools are not field-redacted.** `search_employee` and
-  `search_holidays` return a fixed, curated projection of non-sensitive
-  identity/calendar fields (e.g. employee id + name). They never return
-  arbitrary stored fields, so they are outside the redaction path by design.
+  `search_holidays` return a fixed, curated projection of
+  identity/calendar fields. They never return arbitrary stored fields, so
+  they are outside the *redaction* path by design — a fixed projection with
+  required fields cannot be answered field by field.
   Put sensitive employee fields behind a `deny`/`allow` on `hr.employee` and
   read them through `read_record`/`search_records`, which are enforced.
+  **`search_holidays` does, however, fail closed.** Its projection is the
+  employee link, the dates, the description and the state of a named person's
+  time off, which is squarely the kind of thing a policy on `hr.leave` is
+  written to withhold — so before reading, it asks the policy whether any
+  field it projects is restricted on `hr.leave.report.calendar`, and refuses
+  with an explanatory error if so. Being outside redaction is a design
+  choice; answering around the mask is not. With no policy file it behaves
+  exactly as before.
+- **Every segment of a path is judged against the model being read**, not
+  against the related model: a dotted path and an `any` / `not any` leaf both
+  carry field names belonging to a comodel, and resolving which model that is
+  would need an Odoo read on the refusal path. So every segment is checked
+  against the outer model's rules, which can refuse a read that a
+  comodel-aware check would have allowed -- `partner_id.name` is refused on a
+  model that denies `name`. That is the fail-closed direction and the reason
+  it is not "fixed". It is also what closes a *loop-back* path, where the last
+  hop returns to the model being read (`account_id.line_ids.name` on
+  `account.analytic.line`) and asks the denied question outright.
+- **A domain the walk cannot reach the bottom of is refused.** The walk is
+  capped (a domain is caller data, not trusted nesting); past the cap the
+  domain is rejected with an explanatory error rather than checked as far as
+  the cap and let through, because the segments below it are exactly where a
+  padded chain would hide a denied leaf. Models no rule applies to stay
+  pass-through, depth included, so no policy file still means no behaviour
+  change.
+- **A far-model field is not reached by this check.** A path that hops from an
+  *open* field on the model being read into a field the policy never names
+  (`employee_id.hourly_cost` from a model with no rule on `hourly_cost`)
+  passes: closing it needs comodel knowledge this module deliberately does not
+  fetch. Rule the far model directly, or keep the "never infer around a
+  refusal" instruction that governs the agent.
 - **`read_attachment`** returns attachment metadata + content. Field ACL
   applies to the metadata dict; it does not parse attachment *payloads*. Do
   not rely on it to redact secrets embedded inside attachment bytes.
