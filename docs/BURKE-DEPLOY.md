@@ -13,7 +13,7 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.17` |
+| Package version | `1.3.0+burke.18` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
 | Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + read-only team bundle (§12) + this doc |
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.17`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.18`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -272,10 +272,10 @@ to gate, which is why the read-only rollout does not depend on either of them.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.17`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.17"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.18`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.18"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.17`
+  - [ ] `package_version` is `1.3.0+burke.18`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -551,7 +551,7 @@ tool list, and that no write tool appears in `tools/list`. Verified against the
 ```
 tools exposed: 37
 write tools exposed: none
-package_version 1.3.0+burke.17   field_acl.active true
+package_version 1.3.0+burke.18   field_acl.active true
 tools_filtered  chatter_post, execute_approved_write, execute_method,
                 preview_write, validate_write
 write_execution_enabled false   chatter_direct_enabled false
