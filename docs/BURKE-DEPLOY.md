@@ -486,6 +486,57 @@ how client capabilities are advertised, re-run the §6 writes-enabled check by
 hand — a green test suite proves the refusal logic, not that a real Claude
 client still renders the prompt.
 
+### What a version bump rewrites — and the one place it must not
+
+This applies to any bump, whether it is the `<NEW_VER>+burke.1` reset above or a
+routine `+burke.N` → `+burke.N+1` on the same upstream base. Nothing derives the
+version from anything else: `package_version()` reads the installed
+distribution's metadata and `build_mcpb.py` parses `pyproject.toml`, so there is
+no `__version__` constant and no test that pins a version literal. The literal is
+written out by hand in **seven places across three files**, and getting that set
+right is the whole job.
+
+| Where | Occurrences |
+|---|---|
+| `pyproject.toml` — the `version =` line | 1 |
+| `uv.lock` — `version` under the `odoo-mcp` package entry | 1 |
+| §1 — the `Package version` table row | 1 |
+| §2 — the `Expect …` line under option A | 1 |
+| §6 — the `--version`, `--health` and `health_check` checklist lines | 3 |
+
+`pyproject.toml` is the source of truth and the other six are copies of it. The
+`uv.lock` entry is an editable self-reference that mirrors `pyproject.toml`;
+bumps have skipped it several times and left it stale, and `uv lock --check`
+exits 0 only once it matches. Confirm the sweep was complete before committing,
+**by location and not by count**:
+
+```bash
+grep -n '<OLD_VER>' docs/BURKE-DEPLOY.md
+grep -n '<OLD_VER>' pyproject.toml uv.lock
+```
+
+Every line the first command still returns has to sit inside §12's "Last real
+run" block. A hit anywhere else is one you missed. Do not sweep to reach a
+particular number, and do not expect zero: if that transcript was last refreshed
+under the version you are bumping away from, it will report a hit, and that hit
+is the correct answer.
+
+**Leave §12's "Last real run" block alone.** It is the one place in this document
+where an older version is the correct one: it records what
+`verify_burke_mcpb.py` actually printed, on a stated date, under the build that
+ran it. A find-and-replace swept across the whole file once and rewrote it, which
+silently turned the record of a run that happened into a claim that a version
+nobody had verified had passed. That block is *expected* to fall behind §1, and
+it changes only when someone pastes the output of a newer real run and moves the
+date with it. The pass criteria above it name no version at all, for the same
+reason.
+
+Finally, after the bump PR merges, tag the **merge commit** on
+`burke/hardening-1.3.0`, with the local suffix dotted — `<VER>+burke.N` →
+`burke-<VER>.N`. `burke-mcp-deploy` pins that exact tag rather than a moving
+branch, and its `build_mcpb.py` refuses to build unless the mcp-odoo checkout's
+`HEAD` carries it, so a tag left on the PR branch's own commit fails the build.
+
 ---
 
 ## 12. The team `.mcpb` bundle — read-only, one-click
