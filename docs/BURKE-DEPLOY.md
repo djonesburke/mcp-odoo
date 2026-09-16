@@ -545,13 +545,35 @@ This extracts the bundle to a path containing a space (the real extensions
 directory has one), launches the exact command its manifest declares, and
 drives a real MCP handshake over stdio with fake Odoo credentials — nothing
 touches Odoo. It asserts the Burke version, `field_acl.active`, the filtered
-tool list, and that no write tool appears in `tools/list`. Verified against the
-`burke-mcp-deploy` bundle on 2026-08-24:
+tool list, and that no write tool appears in `tools/list`.
+
+#### What a passing run must show
+
+Check the output against this list. The version to expect is the one in §1 —
+whatever the build currently is — and it is deliberately not repeated here, so
+that a version bump has one fewer place to miss.
+
+- `package_version` — the `+burke.N` version from §1. A bare `1.3.0` is upstream
+  from PyPI and means the bundle vendored the wrong wheel.
+- `field_acl.active` — `true`. If `false`, all masking is off.
+- `write tools exposed` — `none`, and `tools_filtered` names the whole write
+  surface including `execute_method`.
+- `write_execution_enabled` and `chatter_direct_enabled` — both `false`.
+- `RESULT: PASS` on the last line.
+
+#### Last real run — a dated record, not a checklist
+
+**Do not rewrite this block on a version bump.** It is a transcript of what
+`verify_burke_mcpb.py` actually printed against the `burke-mcp-deploy` bundle on
+**2026-08-24**, when the build was `+burke.9`. The version in it is a fact about
+that run, so it is expected to fall behind §1 and rewriting it would assert a
+verification nobody performed. Replace it only by pasting the output of a newer
+real run, and move the date with it.
 
 ```
 tools exposed: 37
 write tools exposed: none
-package_version 1.3.0+burke.18   field_acl.active true
+package_version 1.3.0+burke.9   field_acl.active true
 tools_filtered  chatter_post, execute_approved_write, execute_method,
                 preview_write, validate_write
 write_execution_enabled false   chatter_direct_enabled false
