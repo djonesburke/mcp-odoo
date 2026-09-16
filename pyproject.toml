@@ -39,7 +39,7 @@ dev = [
     "black",
     "isort",
     "mypy",
-    "pytest",
+    "pytest>=7",
     "ruff",
     "build",
     "twine",
@@ -63,12 +63,38 @@ target-version = ["py310"]
 profile = "black"
 line_length = 88
 
+[tool.pytest.ini_options]
+# Seven test modules share fakes via `from tests.test_batch_write import FakeCtx`,
+# which needs the REPO ROOT on sys.path. `python -m pytest` run from the root (what
+# CI does) supplies that by accident, because `-m` prepends the working directory;
+# the `pytest` console script and `pytest <path>` run from any other directory do
+# not, and the suite then dies with 7 collection errors and ZERO tests run while
+# still looking like a plain import failure. Pinning it here is what makes a local
+# run mean the same thing as a CI run, whichever form is used.
+# `pythonpath` is core pytest >= 7 (floored in the dev extra above), not a plugin.
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+# The quality gate is `mypy src` (CONTRIBUTING.md); `files` makes a bare `mypy`
+# mean exactly that instead of erroring out with "no files or modules specified".
+files = ["src"]
+# examples/ is excluded from discovery, not overlooked. Two standalone snippets
+# there (examples/langgraph/odoo_agent.py and examples/openai-agents/odoo_agent.py)
+# both map to the module basename `odoo_agent` in flat non-package directories, so
+# any recursive run stops at discovery with "Duplicate module named" before it
+# checks anything. They also import langchain/crewai/openai-agents, which are not
+# dependencies of this package, so they were never part of the typed surface.
+# Note the pattern is matched against paths relative to the CURRENT DIRECTORY,
+# so it holds for a run from the repo root -- which is what CONTRIBUTING.md
+# documents. Invoked from elsewhere with an absolute path, examples/ is
+# rediscovered and the duplicate returns.
+exclude = ["^examples/"]
 
 # Tool modules annotate protocol-level response models (typed MCP outputSchema)
 # while the functions keep returning the plain-dict envelope MCPServer validates

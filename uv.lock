@@ -866,7 +866,7 @@ requires-dist = [
     { name = "isort", marker = "extra == 'dev'" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "mypy", marker = "extra == 'dev'" },
-    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7" },
     { name = "requests", specifier = ">=2.31.0" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "twine", marker = "extra == 'dev'" },
