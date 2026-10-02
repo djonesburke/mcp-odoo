@@ -4,7 +4,7 @@ Hand this to whoever sets up a machine. Target: **local stdio on Windows**, one
 pinned build across all Burke PCs.
 
 > **This file lives in a PUBLIC repository.** Every Burke-specific value below is
-> a `<PLACEHOLDER>`. Get the real values from Dalton — they are not written down
+> a `<PLACEHOLDER>`. Get the real values from the owner — they are not written down
 > here, and must not be added to this file.
 
 ---
@@ -71,7 +71,7 @@ you hit `odoo-mcp-multi`.
 uvx --from git+https://github.com/djonesburke/mcp-odoo@burke/hardening-1.3.0 python -m odoo_mcp --version
 ```
 
-Pin to a **tag** rather than a branch once one is cut, so the four PCs cannot
+Pin to a **tag** rather than a branch once one is cut, so each workstation cannot
 drift apart between installs.
 
 ---
@@ -119,7 +119,7 @@ __main__.py: error: unrecognized arguments: run
 | Variable | Value | Why |
 |---|---|---|
 | `ODOO_TRANSPORT` | `json2` | XML-RPC is deprecated (Odoo 22 removal). Do not reintroduce it. |
-| `ODOO_MCP_POLICY_FILE` | absolute path | Field ACL. The MCP authenticates as an Odoo **admin**, so Odoo's own field groups do not constrain it — this file is the primary read-path control. |
+| `ODOO_MCP_POLICY_FILE` | absolute path | Field ACL. The MCP authenticates as each person's own Odoo user, and Odoo's own access rights may still permit reads this file masks — so this file is the primary read-path control. |
 | `ODOO_MCP_TOOLS_EXCLUDE` | `execute_method` | **Required.** See §4. |
 | `ODOO_MCP_ENABLE_WRITES` | omit, or `1` | Omit for a read-only machine. Setting `1` enables `execute_approved_write` **and** `chatter_post`. |
 | `ODOO_MCP_ELICIT_WRITES` | `1` wherever writes are on | Requires a human to confirm each write. Set it on every machine that sets `ODOO_MCP_ENABLE_WRITES`; without it the agent approves its own writes (§5, behavior 3). |
@@ -222,7 +222,7 @@ server-side, and the prompt renders:
 - per-field `before -> after`;
 - fields already at the target value, marked `(unchanged - already set)`;
 - fields the field ACL denies, marked `<hidden by field policy>` — a
-  confirmation dialog must not become a way to read masked margin or cost;
+  confirmation dialog must not become a way to read a masked value, such as a wage or a bank account number;
 - a `WARNING` line naming the reason when the snapshot could not be read.
 
 The snapshot is deliberately **not** part of the approval token payload — if it
@@ -292,9 +292,11 @@ Run on each machine after setup. No live Odoo write is performed.
   - [ ] declining it returns "declined by the human reviewer" and changes nothing
   A write that executes with no prompt means `ODOO_MCP_ELICIT_WRITES` is unset
   or the client cannot elicit — stop and fix it before touching production.
-- [ ] Confirm masking end to end: read `sale.order.line` asking for
-      `["name","price_unit","margin","purchase_price"]`. Expect `margin` and
-      `purchase_price` to come back under `redacted_fields`, not as values.
+- [ ] Confirm masking end to end: read `res.partner` asking for
+      `["id","name","bank_ids"]` and expect `bank_ids` under `redacted_fields`;
+      then call `search_records` on `hr.version` with domain
+      `[["wage",">",0]]` and expect `success: false` with "filtering on
+      restricted fields is blocked".
 - [ ] Confirm the audit log path is being written and is **outside** any git repo
 - [ ] Confirm `MCP_CHATTER_DIRECT` is not set
 - [ ] Call `check_api_key_expiry` and confirm `instance_kind` matches the label on
@@ -307,56 +309,101 @@ machine. Every other control assumes the ACL is on.
 
 ---
 
-## 7. Known limitation — not closed by this build
+## 7. Known limitation — a guard, not a boundary
 
-The field ACL removes denied fields from *results* and blocks *aggregation* on
-them, but does **not** block *domain filtering*. Someone can filter
-`hr.version` by `wage > X` and infer a range from which rows come back, without
-the value ever appearing in a result.
+What the field ACL enforces, as shipped (`src/odoo_mcp/field_policy.py`, rules in
+`odoo_mcp_policy.json`):
 
-That mattered less when the masked set was mostly commercial. As of 2026-08-25
-margin and cost are deliberately readable (Purchasing and Accounting need
-them), so what remains masked is **only** employee pay, employee PII, and bank
-account numbers — which makes this hole narrower and worse at the same time.
+- **Results.** Denied fields are removed from returned records and listed under
+  `redacted_fields` (`FieldPolicy.redact_records`).
+- **Aggregation.** Grouping or measuring a denied field is refused
+  (`FieldPolicy.check_aggregate`).
+- **Domain filters.** A domain that filters on a denied field is refused before
+  Odoo is read (`FieldPolicy.check_domain`, added by PR #11). It runs on
+  `search_records` (including the domain built from its free-text `query`),
+  `aggregate_records`, `index_knowledge`, `search_across_instances`,
+  `aggregate_across_instances` and the `odoo://search/...` resource. The error
+  reads *"Field policy denies access to [...] on <model>; filtering on
+  restricted fields is blocked to prevent inference."* It names the model and
+  the fields, never a value from the domain. Every segment of a dotted path is
+  checked, and `any` / `not any` sub-domains are walked. A domain nested past
+  8 levels is refused outright.
 
-Closing it properly needs Odoo-side restriction, not a wider mask. Read-only
+So filtering `hr.version` by `wage > X` is blocked on those tools. Domain
+filters are checked on the read tools listed above. No claim is made for other
+tools.
+
+What the shipped policy masks, by category (generic names; the exact fields are
+in `odoo_mcp_policy.json`). A deployment may ship a narrower policy; check the
+file actually installed (§12):
+
+- **Bank account numbers**, by field name on every model, plus the account
+  number, the holder name and the display name on bank-account records.
+- **Employee pay and personal data** — the contract/wage model, employee
+  records (exclusive whitelist), and applicant salary and contact fields.
+- **Absence facts** — who is off, when, and the type and state. The time-off
+  models and their report models return only ids; company closures read as
+  anonymous date ranges; a link to a time-off record is denied on every model;
+  `search_holidays` refuses rather than answering around the mask.
+- **Per-person time attribution and derived labour cost** — employee, user,
+  job title, manager and description on analytic lines, and the stored
+  employee cost and total cost on work-order time entries.
+- **Cash position** — bank statement balances, statement-line running balance,
+  account current balance, and the journal dashboard figures.
+
+Margin, cost, partner credit and balance, and the general ledger are
+deliberately **readable** (2026-08-25): Purchasing and Accounting need them.
+
+What this does **not** close:
+
+- **Far-model paths.** `check_domain` judges every path segment against the
+  model being read, because resolving the related model would need an Odoo
+  read. A path that hops from an *open* field into a field the policy never
+  names on the outer model passes. This can also over-refuse (`partner_id.name`
+  is refused on a model that denies `name`).
+- **Aggregates over open fields.** Cash position stays derivable from an
+  aggregate on the general ledger filtered by account type, which no mask
+  touches. A test pins this as open.
+- **Other absence paths.** Chatter messages and activities attached to
+  time-off records, calendar events and work entries are not masked.
+- **Curated tools and `execute_method`.** `search_employee` and similar tools
+  return a fixed projection outside the redaction path. `execute_method`
+  bypasses both redaction and domain checks; it is safe only because §4
+  excludes it.
+- **Instance keys.** Rules apply only to instance names present in the policy
+  file; any other configured instance name is unmasked.
+- **A different client** using the same Odoo credential is unaffected.
+
+The mask is a guard against accident and casual curiosity, not a security
+boundary: the MCP authenticates as an Odoo user that can read far more than the
+mask allows, and anyone holding Access Rights can re-grant themselves anything.
+
+Closing the rest needs Odoo-side restriction, not a wider mask. Read-only
 tool configs and skill defaults are conveniences, not security boundaries —
-Odoo per-user ACLs are the enforcement layer, and **as of 2026-08-25 they are
-doing that job for one of the three holders.**
+Odoo per-user ACLs are the enforcement layer, and they only do that job once a
+user's effective groups are restricted.
 
-Matt's Odoo groups were narrowed that day: `Payroll / Officer` removed,
-`Employees / Administrator` and `Recruitment / Administrator` downgraded to
-Officer, `Accounting / Administrator` to Read-only, and `Role / Administrator`
-swapped for `Role / User`. That last one is the important one — it implied
-`Access Rights` (group 2), the only group with write on `ir.model.access`, so
-he could previously have granted the rest back to himself. Verified by reading
-`all_group_ids` rather than `group_ids`: group 2 no longer appears. For him the
-field ACL is now genuinely defense in depth.
-
-By end of day 2026-08-25 the same was true of every team holder. Amber's
-`Role / Administrator` was swapped for `Role / User`, and `sales@` — a shared
-mailbox login — had Access Rights revoked. **Both people who use the Odoo
-connector are now constrained by Odoo itself, not by this file.**
-
-Two accounts still hold Access Rights, both deliberately: Dalton, and Burke's
-external accountant, whose grant is **direct** rather than inherited from
-`Role / Administrator` — so a role swap does not touch it, and removing it means
-removing group 2 from her user record. Reviewed and left in place on 2026-08-25.
+A staff user once held a group that allowed self-granting access; that was
+removed, and the same was done for every team user of the connector, including
+a shared mailbox user. Those users are now constrained by Odoo itself, not by
+this file. The one group that matters is `Access Rights`: it is the only group
+with write on `ir.model.access`, so anyone holding it can re-grant themselves
+the rest. Only designated administrators hold it.
 
 The check that settles this, and the only one worth trusting, reads
 `all_group_ids` rather than `group_ids`, because implication makes the effective
-list larger than what was granted:
+list larger than what was granted (a role group can imply `Access Rights`
+without ever listing it). Group ids are deployment-specific:
 
 ```
-search res.users where all_group_ids in [2] and active = true
+search res.users where all_group_ids in [<ACCESS_RIGHTS_GROUP_ID>] and active = true
 ```
 
-Do **not** reach for `SERVICE-USERS.md` here. It is **RETIRED**, not pending:
-Decision Log 2026-08-20 reversed it — Burke will not buy a per-seat Odoo user
-to change which identity an agent writes as. What that entry promised instead,
-downgrading six `ir.model.access` rows so the dashboard-builder groups lose
-write/create on `res.users`, `res.groups` and `ir.model`, is still outstanding.
-Only the holder of groups 179/180 is on that path, which today is Dalton alone.
+Do **not** reach for `SERVICE-USERS.md` here. It is **RETIRED**, not pending,
+per the deployment's own decision record. What was promised instead —
+downgrading the `ir.model.access` rows so the deployment's restricted groups
+lose write/create on `res.users`, `res.groups` and `ir.model` — should be
+confirmed against the deployment's records rather than assumed done.
 
 ---
 
@@ -375,7 +422,7 @@ The message went to stderr, which in a Claude Desktop extension nobody ever
 sees. The caller could not distinguish **"nothing matched"** from **"your query
 was invalid"**, **"your key expired"**, or **"the server returned 500"**.
 
-Reproduced against Burke production on 2026-08-13, read-only:
+Reproduced against a production instance on 2026-08-13, read-only:
 
 | Call | Result |
 |---|---|
@@ -640,12 +687,13 @@ before concluding a field is missing.
 - **`uv` must be on `PATH` for GUI apps.** The manifest format has no field to
   declare it, so it will never appear in the extension's Requirements list.
   `winget install --id=astral-sh.uv`, then fully restart Claude Desktop.
-- **§7 still stands.** The ACL strips denied fields from *results*, not from
-  *domains* — `margin > X` as a filter still discriminates. The MCP
-  authenticates as an Odoo **admin**, so the tool config is a convenience, not
-  a boundary. Real containment is a restricted Odoo user per person, which is
-  what `SERVICE-USERS.md` in `burke-mcp-deploy` specifies. Widening the
-  audience makes that more worth doing, not less.
+- **§7 still stands.** The ACL strips denied fields from *results* and, on the
+  read tools listed in §7, refuses domains and aggregates over them, but it is
+  a guard, not a boundary: paths through related models, aggregates over open fields and instance names the
+  policy does not list are not covered. The MCP authenticates as each person's
+  own Odoo user; the tool config is a convenience, not a boundary. Real
+  containment is a restricted Odoo user per person, enforced by Odoo itself
+  (§7). Widening the audience makes that more worth doing, not less.
 - **One key per person.** Per-user keys are the same string on prod and staging
   (§10), and `check_api_key_expiry` reports only the key it is using
   (`visibility: own_user_only`).
@@ -665,5 +713,5 @@ the build if either value appears anywhere in the tracked tree.
 The check itself never stores or prints the values it looks for — it hashes
 tokens and compares hashes, and a failure reports a file and line number only.
 See the script's docstring for how to regenerate or extend the hash set; get
-the literal values from Dalton, and do not write them into this repo, a commit
+the literal values from the owner, and do not write them into this repo, a commit
 message, or a PR description.
