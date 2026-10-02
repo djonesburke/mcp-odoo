@@ -307,19 +307,74 @@ machine. Every other control assumes the ACL is on.
 
 ---
 
-## 7. Known limitation — not closed by this build
+## 7. Known limitation — a guard, not a boundary
 
-The field ACL removes denied fields from *results* and blocks *aggregation* on
-them, but does **not** block *domain filtering*. Someone can filter
-`hr.version` by `wage > X` and infer a range from which rows come back, without
-the value ever appearing in a result.
+What the field ACL enforces, as shipped (`src/odoo_mcp/field_policy.py`, rules in
+`odoo_mcp_policy.json`):
 
-That mattered less when the masked set was mostly commercial. As of 2026-08-25
-margin and cost are deliberately readable (Purchasing and Accounting need
-them), so what remains masked is **only** employee pay, employee PII, and bank
-account numbers — which makes this hole narrower and worse at the same time.
+- **Results.** Denied fields are removed from returned records and listed under
+  `redacted_fields` (`FieldPolicy.redact_records`).
+- **Aggregation.** Grouping or measuring a denied field is refused
+  (`FieldPolicy.check_aggregate`).
+- **Domain filters.** A domain that filters on a denied field is refused before
+  Odoo is read (`FieldPolicy.check_domain`, added by PR #11). It runs on
+  `search_records` (including the domain built from its free-text `query`),
+  `aggregate_records`, `index_knowledge`, `search_across_instances`,
+  `aggregate_across_instances` and the `odoo://search/...` resource. The error
+  reads *"Field policy denies access to [...] on <model>; filtering on
+  restricted fields is blocked to prevent inference."* It names the model and
+  the fields, never a value from the domain. Every segment of a dotted path is
+  checked, and `any` / `not any` sub-domains are walked. A domain nested past
+  8 levels is refused outright.
 
-Closing it properly needs Odoo-side restriction, not a wider mask. Read-only
+So filtering `hr.version` by `wage > X` is blocked, as is filtering any other
+masked field.
+
+What the shipped policy masks, by category (generic names; the exact fields are
+in `odoo_mcp_policy.json`):
+
+- **Bank account numbers**, by field name on every model, plus the bank-account
+  records themselves.
+- **Employee pay and personal data** — the contract/wage model, employee
+  records (exclusive whitelist), and applicant salary and contact fields.
+- **Absence facts** — who is off, when, and the type and state. The time-off
+  models and their report models return only ids; company closures read as
+  anonymous date ranges; a link to a time-off record is denied on every model;
+  `search_holidays` refuses rather than answering around the mask.
+- **Per-person time attribution and derived labour cost** — employee, user,
+  job title, manager and description on analytic lines, and the stored
+  employee cost and total cost on work-order time entries.
+- **Cash position** — bank statement balances, statement-line running balance,
+  account current balance, and the journal dashboard figures.
+
+Margin, cost, partner credit and balance, and the general ledger are
+deliberately **readable** (2026-08-25): Purchasing and Accounting need them.
+
+What this does **not** close:
+
+- **Far-model paths.** `check_domain` judges every path segment against the
+  model being read, because resolving the related model would need an Odoo
+  read. A path that hops from an *open* field into a field the policy never
+  names on the outer model passes. This can also over-refuse (`partner_id.name`
+  is refused on a model that denies `name`).
+- **Aggregates over open fields.** Cash position stays derivable from an
+  aggregate on the general ledger filtered by account type, which no mask
+  touches. A test pins this as open.
+- **Other absence paths.** Chatter messages and activities attached to
+  time-off records, calendar events and work entries are not masked.
+- **Curated tools and `execute_method`.** `search_employee` and similar tools
+  return a fixed projection outside the redaction path. `execute_method`
+  bypasses both redaction and domain checks; it is safe only because §4
+  excludes it.
+- **Instance keys.** Rules apply only to instance names present in the policy
+  file; any other configured instance name is unmasked.
+- **A different client** using the same Odoo credential is unaffected.
+
+The mask is a guard against accident and casual curiosity, not a security
+boundary: the MCP authenticates as an Odoo user that can read far more than the
+mask allows, and anyone holding Access Rights can re-grant themselves anything.
+
+Closing the rest needs Odoo-side restriction, not a wider mask. Read-only
 tool configs and skill defaults are conveniences, not security boundaries —
 Odoo per-user ACLs are the enforcement layer, and **as of 2026-08-25 they are
 doing that job for one of the three holders.**
@@ -640,12 +695,13 @@ before concluding a field is missing.
 - **`uv` must be on `PATH` for GUI apps.** The manifest format has no field to
   declare it, so it will never appear in the extension's Requirements list.
   `winget install --id=astral-sh.uv`, then fully restart Claude Desktop.
-- **§7 still stands.** The ACL strips denied fields from *results*, not from
-  *domains* — `margin > X` as a filter still discriminates. The MCP
-  authenticates as an Odoo **admin**, so the tool config is a convenience, not
-  a boundary. Real containment is a restricted Odoo user per person, which is
-  what `SERVICE-USERS.md` in `burke-mcp-deploy` specifies. Widening the
-  audience makes that more worth doing, not less.
+- **§7 still stands.** The ACL strips denied fields from *results* and refuses
+  domains and aggregates over them, but it is a guard, not a boundary: paths
+  through related models, aggregates over open fields and instance names the
+  policy does not list are not covered. The MCP authenticates as an Odoo
+  **admin**, so the tool config is a convenience, not a boundary. Real
+  containment is a restricted Odoo user per person, enforced by Odoo itself
+  (§7). Widening the audience makes that more worth doing, not less.
 - **One key per person.** Per-user keys are the same string on prod and staging
   (§10), and `check_api_key_expiry` reports only the key it is using
   (`visibility: own_user_only`).
