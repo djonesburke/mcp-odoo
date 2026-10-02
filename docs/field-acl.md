@@ -103,6 +103,10 @@ withheld, so it does not hallucinate their absence or values.
   order.** The far model's own `_order` decides, and the policy for that model
   is not consulted (the same far-model limit as above). Group-by ordering
   follows the group-by fields themselves, which are checked.
+- **Only `search_records` pins the default order.** `search_across_instances`,
+  the `odoo://search/...` resource and `index_knowledge` take no `order` and
+  return rows in the model's default order, which can follow a masked column on
+  a governed model.
 - **A domain the walk cannot reach the bottom of is refused.** The walk is
   capped (a domain is caller data, not trusted nesting); past the cap the
   domain is rejected with an explanatory error rather than checked as far as
