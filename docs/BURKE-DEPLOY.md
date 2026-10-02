@@ -222,7 +222,7 @@ server-side, and the prompt renders:
 - per-field `before -> after`;
 - fields already at the target value, marked `(unchanged - already set)`;
 - fields the field ACL denies, marked `<hidden by field policy>` — a
-  confirmation dialog must not become a way to read masked margin or cost;
+  confirmation dialog must not become a way to read a masked value, such as a wage or a bank account number;
 - a `WARNING` line naming the reason when the snapshot could not be read.
 
 The snapshot is deliberately **not** part of the approval token payload — if it
@@ -292,9 +292,11 @@ Run on each machine after setup. No live Odoo write is performed.
   - [ ] declining it returns "declined by the human reviewer" and changes nothing
   A write that executes with no prompt means `ODOO_MCP_ELICIT_WRITES` is unset
   or the client cannot elicit — stop and fix it before touching production.
-- [ ] Confirm masking end to end: read `sale.order.line` asking for
-      `["name","price_unit","margin","purchase_price"]`. Expect `margin` and
-      `purchase_price` to come back under `redacted_fields`, not as values.
+- [ ] Confirm masking end to end: read `res.partner` asking for
+      `["id","name","bank_ids"]` and expect `bank_ids` under `redacted_fields`;
+      then call `search_records` on `hr.version` with domain
+      `[["wage",">",0]]` and expect `success: false` with "filtering on
+      restricted fields is blocked".
 - [ ] Confirm the audit log path is being written and is **outside** any git repo
 - [ ] Confirm `MCP_CHATTER_DIRECT` is not set
 - [ ] Call `check_api_key_expiry` and confirm `instance_kind` matches the label on
@@ -327,14 +329,16 @@ What the field ACL enforces, as shipped (`src/odoo_mcp/field_policy.py`, rules i
   checked, and `any` / `not any` sub-domains are walked. A domain nested past
   8 levels is refused outright.
 
-So filtering `hr.version` by `wage > X` is blocked, as is filtering any other
-masked field.
+So filtering `hr.version` by `wage > X` is blocked on those tools. Domain
+filters are checked on the read tools listed above. No claim is made for other
+tools.
 
 What the shipped policy masks, by category (generic names; the exact fields are
-in `odoo_mcp_policy.json`):
+in `odoo_mcp_policy.json`). A deployment may ship a narrower policy; check the
+file actually installed (§12):
 
-- **Bank account numbers**, by field name on every model, plus the bank-account
-  records themselves.
+- **Bank account numbers**, by field name on every model, plus the account
+  number, the holder name and the display name on bank-account records.
 - **Employee pay and personal data** — the contract/wage model, employee
   records (exclusive whitelist), and applicant salary and contact fields.
 - **Absence facts** — who is off, when, and the type and state. The time-off
@@ -695,11 +699,11 @@ before concluding a field is missing.
 - **`uv` must be on `PATH` for GUI apps.** The manifest format has no field to
   declare it, so it will never appear in the extension's Requirements list.
   `winget install --id=astral-sh.uv`, then fully restart Claude Desktop.
-- **§7 still stands.** The ACL strips denied fields from *results* and refuses
-  domains and aggregates over them, but it is a guard, not a boundary: paths
+- **§7 still stands.** The ACL strips denied fields from *results* and, on the read
+  tools listed in §7, refuses domains and aggregates over them, but it is a guard, not a boundary: paths
   through related models, aggregates over open fields and instance names the
-  policy does not list are not covered. The MCP authenticates as an Odoo
-  **admin**, so the tool config is a convenience, not a boundary. Real
+  policy does not list are not covered. The MCP authenticates as each person's
+  own Odoo user; the tool config is a convenience, not a boundary. Real
   containment is a restricted Odoo user per person, enforced by Odoo itself
   (§7). Widening the audience makes that more worth doing, not less.
 - **One key per person.** Per-user keys are the same string on prod and staging
