@@ -350,6 +350,34 @@ def test_check_order_reads_the_field_before_a_read_group_suffix():
     assert policy.check_order("default", "hr.employee", "__count desc, name") is None
 
 
+def test_check_order_sees_through_double_quoted_names():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    for order in ('"wage" desc', 'x,"wage"', '"contract_id"."wage"', '"wage":sum'):
+        err = policy.check_order("default", "hr.employee", order)
+        assert err is not None and "wage" in err, order
+    assert policy.check_order("default", "hr.employee", '"name" desc') is None
+
+
+def test_check_aggregate_checks_every_segment_of_a_dotted_path():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    for names in (["contract_id.wage"], ["wage.x"], ["contract_id.wage:sum"]):
+        err = policy.check_aggregate("default", "hr.employee", names)
+        assert err is not None and "wage" in err, names
+    assert (
+        policy.check_aggregate(
+            "default", "hr.employee", ["department_id.name", "create_date:month"]
+        )
+        is None
+    )
+
+
+def test_governs_reports_whether_any_rule_applies():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    assert policy.governs("default", "hr.employee") is True
+    assert policy.governs("default", "res.partner") is False
+    assert policy.governs("other", "hr.employee") is False
+
+
 def test_check_order_allows_ordinary_fields_and_empty_orders():
     policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
     assert policy.check_order("default", "hr.employee", "name desc, id") is None

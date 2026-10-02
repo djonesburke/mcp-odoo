@@ -107,7 +107,8 @@ def _order_field_segments(order: Any) -> List[str]:
     orders may also carry a ``:granularity`` or ``:aggregate`` suffix
     (``date_deadline:month``, ``amount:sum``); only the field name before the
     colon counts. Dotted paths keep every segment, as in
-    :func:`_domain_field_segments`. The virtual ``__count`` key names no field.
+    :func:`_domain_field_segments`; surrounding double quotes are dropped
+    from each name. The virtual ``__count`` key names no field.
 
     Raises :class:`ValueError` for anything that is not a string, so the
     caller refuses it instead of passing a shape it cannot read.
@@ -122,8 +123,11 @@ def _order_field_segments(order: Any) -> List[str]:
         name = parts[0].split(":", 1)[0]
         if name == "__count":
             continue
-        segments.extend(s.strip() for s in name.split(".") if s.strip())
-    return segments
+        # Odoo accepts a double-quoted field name in an order term.
+        segments.extend(
+            s.strip().strip('"').strip() for s in name.split(".") if s.strip()
+        )
+    return [s for s in segments if s]
 
 
 class FieldPolicyError(ValueError):
@@ -228,15 +232,29 @@ class FieldPolicy:
         _, redacted = self.filter_fields(instance, model, field_names)
         return redacted
 
+    def governs(self, instance: str, model: str) -> bool:
+        """True when some rule applies to ``model`` on ``instance``."""
+        return self._effective(instance, model) is not None
+
     def check_aggregate(
         self, instance: str, model: str, fields: Iterable[str]
     ) -> Optional[str]:
-        """Return an error string if any aggregate/groupby field is denied."""
-        _, redacted = self.filter_fields(instance, model, fields)
+        """Return an error string if any aggregate/groupby field is denied.
+
+        Each name is cut at ``:`` (granularity or aggregate suffix) and then
+        into its dotted segments, every one checked against ``model`` as in
+        :meth:`check_domain`: ``contract_id.wage`` reaches the denied field
+        through the relation.
+        """
+        names: List[str] = []
+        for field in fields:
+            head = str(field).split(":", 1)[0]
+            names.extend(s.strip() for s in head.split(".") if s.strip())
+        _, redacted = self.filter_fields(instance, model, names)
         if redacted:
             return (
                 "Field policy denies access to "
-                f"{sorted(redacted)} on {model}; aggregation on restricted "
+                f"{sorted(set(redacted))} on {model}; aggregation on restricted "
                 "fields is blocked to prevent inference."
             )
         return None

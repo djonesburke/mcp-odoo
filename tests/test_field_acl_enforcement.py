@@ -403,6 +403,80 @@ def test_aggregate_refuses_an_order_on_a_denied_field(deny_credit_limit):
     assert "credit_limit" in out["error"] and "ordering" in out["error"]
 
 
+def test_aggregate_refuses_a_dotted_group_by_through_a_denied_field(
+    deny_credit_limit,
+):
+    out = server.aggregate_records(
+        FakeCtx(PolicyClient()),
+        model="res.partner",
+        group_by=["parent_id.credit_limit"],
+        measures=["id:count"],
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"]
+
+
+def test_aggregate_refuses_a_dotted_measure_through_a_denied_field(
+    deny_credit_limit,
+):
+    out = server.aggregate_records(
+        FakeCtx(PolicyClient()),
+        model="res.partner",
+        group_by=["country_id"],
+        measures=["parent_id.credit_limit:sum"],
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"]
+
+
+def test_aggregate_allows_an_ordinary_dotted_group_by(deny_credit_limit):
+    out = server.aggregate_records(
+        FakeCtx(AggregateClient()),
+        model="res.partner",
+        group_by=["parent_id.name"],
+        measures=["id:count"],
+    )
+    assert out["success"] is True
+
+
+def test_search_records_refuses_a_double_quoted_order_on_a_denied_field(
+    deny_credit_limit,
+):
+    client = CountingPolicyClient()
+    for order in ('"credit_limit" desc', 'name,"credit_limit"'):
+        out = server.search_records(FakeCtx(client), model="res.partner", order=order)
+        assert out["success"] is False, order
+        assert "credit_limit" in out["error"]
+    assert client.calls == 0
+
+
+class OrderRecordingClient(PolicyClient):
+    def __init__(self):
+        self.orders = []
+
+    def search_read(self, *args, **kwargs):
+        self.orders.append(kwargs.get("order"))
+        return super().search_read(*args, **kwargs)
+
+
+def test_search_records_pins_the_default_order_on_a_governed_model(
+    deny_credit_limit,
+):
+    """No order means the model's default, which may follow a masked column."""
+    client = OrderRecordingClient()
+    server.search_records(FakeCtx(client), model="res.partner")
+    server.search_records(FakeCtx(client), model="res.partner", order="name desc")
+    assert client.orders == ["id", "name desc"]
+
+
+def test_search_records_leaves_the_default_order_on_an_ungoverned_model(
+    deny_credit_limit,
+):
+    client = OrderRecordingClient()
+    server.search_records(FakeCtx(client), model="sale.order")
+    assert client.orders == [None]
+
+
 class AggregateClient(PolicyClient):
     def get_server_version(self):
         return {"server_version": "19.0"}
