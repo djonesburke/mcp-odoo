@@ -369,6 +369,168 @@ def test_search_resource_refuses_a_domain_over_a_denied_field(
     assert client.calls == 0
 
 
+def test_search_records_refuses_an_order_on_a_denied_field(deny_credit_limit):
+    """Sorting ranks the rows by the withheld column."""
+    client = CountingPolicyClient()
+    for order in ("credit_limit", "name, credit_limit desc"):
+        out = server.search_records(
+            FakeCtx(client), model="res.partner", fields=["name"], order=order
+        )
+        assert out["success"] is False
+        assert "credit_limit" in out["error"]
+        assert "res.partner" in out["error"]
+        assert "ordering" in out["error"]
+    assert client.calls == 0, "the refusal must happen before Odoo is read"
+
+
+def test_search_records_still_answers_an_allowed_order(deny_credit_limit):
+    out = server.search_records(
+        FakeCtx(PolicyClient()), model="res.partner", order="name desc, id"
+    )
+    assert out["success"] is True
+    assert out["count"] == 2
+
+
+def test_aggregate_refuses_an_order_on_a_denied_field(deny_credit_limit):
+    out = server.aggregate_records(
+        FakeCtx(PolicyClient()),
+        model="res.partner",
+        group_by=["country_id"],
+        measures=["id:count"],
+        order="credit_limit:sum desc",
+    )
+    assert out["success"] is False
+    assert "credit_limit" in out["error"] and "ordering" in out["error"]
+
+
+class AggregateClient(PolicyClient):
+    def get_server_version(self):
+        return {"server_version": "19.0"}
+
+    def execute_method(self, model, method, *args, **kwargs):
+        if method == "formatted_read_group":
+            return [{"country_id": False, "__count": 2}]
+        raise AssertionError(f"unexpected call: {model}.{method}")
+
+
+def test_aggregate_still_answers_an_allowed_order(deny_credit_limit):
+    out = server.aggregate_records(
+        FakeCtx(AggregateClient()),
+        model="res.partner",
+        group_by=["country_id"],
+        measures=["id:count"],
+        order="__count desc",
+    )
+    assert out["success"] is True
+
+
+def test_submit_async_index_knowledge_refuses_a_domain_over_a_denied_field(
+    deny_credit_limit,
+):
+    """The queued job must not index around the guard index_knowledge has."""
+    client = CountingPolicyClient()
+    out = server.submit_async_task(
+        FakeCtx(client),
+        operation="index_knowledge",
+        params={"model": "res.partner", "domain": [["credit_limit", ">", 1000]]},
+    )
+    assert out["success"] is False
+    assert out["tool"] == "submit_async_task"
+    assert "credit_limit" in out["error"]
+    assert "filtering on restricted fields" in out["error"]
+    assert "task_id" not in out
+    assert client.calls == 0
+
+
+def test_submit_async_index_knowledge_error_matches_index_knowledge(
+    deny_credit_limit,
+):
+    domain = [["credit_limit", ">", 1000]]
+    direct = server.index_knowledge(
+        FakeCtx(CountingPolicyClient()), model="res.partner", domain=domain
+    )
+    queued = server.submit_async_task(
+        FakeCtx(CountingPolicyClient()),
+        operation="index_knowledge",
+        params={"model": "res.partner", "domain": domain},
+    )
+    assert queued["error"] == direct["error"]
+
+
+def test_submit_async_index_knowledge_still_accepts_an_allowed_domain(
+    deny_credit_limit,
+):
+    out = server.submit_async_task(
+        FakeCtx(PolicyClient()),
+        operation="index_knowledge",
+        params={"model": "res.partner", "domain": [["name", "ilike", "a"]]},
+    )
+    assert out["success"] is True
+    assert out["task_id"]
+
+
+class CountOracleClient:
+    """Counts every Odoo call; the refusal must come before any of them."""
+
+    uid = 7
+
+    def __init__(self):
+        self.calls = []
+
+    def get_user_context(self):
+        return {"lang": "en_US", "uid": 7}
+
+    def execute_method(self, model, method, *args, **kwargs):
+        self.calls.append((model, method))
+        if method == "search_count":
+            return 1
+        return []
+
+
+def test_diagnose_access_refuses_a_count_over_a_denied_field(deny_credit_limit):
+    """expected_count against a bisected domain is an oracle on the field."""
+    client = CountOracleClient()
+    out = server.diagnose_access(
+        FakeCtx(client),
+        "res.partner",
+        "read",
+        domain=[["credit_limit", ">", 1000]],
+        expected_count=1,
+    )
+    assert out["success"] is False
+    assert out["tool"] == "diagnose_access"
+    assert "credit_limit" in out["error"]
+    assert "filtering on restricted fields" in out["error"]
+    assert "actual_count" not in out
+    assert client.calls == [], "the refusal must happen before Odoo is read"
+
+
+def test_diagnose_access_refusal_does_not_echo_the_domain_value(deny_credit_limit):
+    out = server.diagnose_access(
+        FakeCtx(CountOracleClient()),
+        "res.partner",
+        "read",
+        domain=[["credit_limit", "=", 424242]],
+        expected_count=1,
+    )
+    assert out["success"] is False
+    assert "424242" not in out["error"]
+
+
+def test_diagnose_access_still_counts_an_allowed_domain(deny_credit_limit):
+    client = CountOracleClient()
+    out = server.diagnose_access(
+        FakeCtx(client),
+        "res.partner",
+        "read",
+        domain=[["name", "ilike", "a"]],
+        expected_count=1,
+    )
+    assert out["success"] is True
+    assert out["actual_count"] == 1
+    assert ("res.partner", "search_count") in client.calls
+
+
 def test_search_records_refuses_a_dotted_path_to_a_denied_field(deny_credit_limit):
     """The relation is not a way around the rule."""
     out = server.search_records(
