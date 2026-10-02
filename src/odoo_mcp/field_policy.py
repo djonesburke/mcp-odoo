@@ -99,6 +99,37 @@ def _domain_field_segments(domain: Any, _depth: int = 0) -> List[str]:
     return segments
 
 
+def _order_field_segments(order: Any) -> List[str]:
+    """Every path segment of every field an ``order`` string sorts on.
+
+    ``order`` is comma-separated terms, each a field path with an optional
+    direction (``asc`` / ``desc``) and ``nulls first|last``. ``read_group``
+    orders may also carry a ``:granularity`` or ``:aggregate`` suffix
+    (``date_deadline:month``, ``amount:sum``); only the field name before the
+    colon counts. Dotted paths keep every segment, as in
+    :func:`_domain_field_segments`; surrounding double quotes are dropped
+    from each name. The virtual ``__count`` key names no field.
+
+    Raises :class:`ValueError` for anything that is not a string, so the
+    caller refuses it instead of passing a shape it cannot read.
+    """
+    if not isinstance(order, str):
+        raise ValueError("order must be a string")
+    segments: List[str] = []
+    for term in order.split(","):
+        parts = term.split()
+        if not parts:
+            continue
+        name = parts[0].split(":", 1)[0]
+        if name == "__count":
+            continue
+        # Odoo accepts a double-quoted field name in an order term.
+        segments.extend(
+            s.strip().strip('"').strip() for s in name.split(".") if s.strip()
+        )
+    return [s for s in segments if s]
+
+
 class FieldPolicyError(ValueError):
     """Raised when a field policy file is present but malformed (fail closed)."""
 
@@ -201,15 +232,29 @@ class FieldPolicy:
         _, redacted = self.filter_fields(instance, model, field_names)
         return redacted
 
+    def governs(self, instance: str, model: str) -> bool:
+        """True when some rule applies to ``model`` on ``instance``."""
+        return self._effective(instance, model) is not None
+
     def check_aggregate(
         self, instance: str, model: str, fields: Iterable[str]
     ) -> Optional[str]:
-        """Return an error string if any aggregate/groupby field is denied."""
-        _, redacted = self.filter_fields(instance, model, fields)
+        """Return an error string if any aggregate/groupby field is denied.
+
+        Each name is cut at ``:`` (granularity or aggregate suffix) and then
+        into its dotted segments, every one checked against ``model`` as in
+        :meth:`check_domain`: ``contract_id.wage`` reaches the denied field
+        through the relation.
+        """
+        names: List[str] = []
+        for field in fields:
+            head = str(field).split(":", 1)[0]
+            names.extend(s.strip() for s in head.split(".") if s.strip())
+        _, redacted = self.filter_fields(instance, model, names)
         if redacted:
             return (
                 "Field policy denies access to "
-                f"{sorted(redacted)} on {model}; aggregation on restricted "
+                f"{sorted(set(redacted))} on {model}; aggregation on restricted "
                 "fields is blocked to prevent inference."
             )
         return None
@@ -254,6 +299,37 @@ class FieldPolicy:
             return (
                 "Field policy denies access to "
                 f"{sorted(set(redacted))} on {model}; filtering on restricted "
+                "fields is blocked to prevent inference."
+            )
+        return None
+
+    def check_order(self, instance: str, model: str, order: Any) -> Optional[str]:
+        """Return an error string if an ``order`` sorts on a denied field.
+
+        Sorting is a ranking of the withheld column: order by a masked wage
+        and the row sequence is the wage order, however the column itself is
+        redacted. Same rules as :meth:`check_domain`: every segment of a
+        dotted path is checked against the outer model, nothing is read from
+        Odoo, the error names the model and field names only, and models no
+        rule applies to pass through. An ``order`` that is not a string is
+        refused on a model with rules, since it cannot be read.
+        """
+        if order is None or self._effective(instance, model) is None:
+            return None
+        try:
+            segments = _order_field_segments(order)
+        except ValueError:
+            return (
+                f"Field policy cannot check the order on {model}: it is not "
+                "a string, so a denied field could be hidden in it."
+            )
+        if not segments:
+            return None
+        _, redacted = self.filter_fields(instance, model, segments)
+        if redacted:
+            return (
+                "Field policy denies access to "
+                f"{sorted(set(redacted))} on {model}; ordering by restricted "
                 "fields is blocked to prevent inference."
             )
         return None

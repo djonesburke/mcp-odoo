@@ -262,6 +262,35 @@ def test_aggregate_across_refuses_a_domain_only_narrowing(monkeypatch, tmp_path)
     assert "globex" in out["results"]
 
 
+def test_aggregate_across_refuses_a_dotted_group_by_per_instance(
+    monkeypatch, tmp_path
+):
+    _deny_credit_limit_for_acme(monkeypatch, tmp_path)
+    _patch_instances(monkeypatch)
+    out = server.aggregate_across_instances(
+        _ctx(),
+        model="res.partner",
+        group_by=["parent_id.credit_limit"],
+        measures=["id:count"],
+    )
+    assert "acme" in out["errors"]
+    assert "credit_limit" in out["errors"]["acme"]
+    assert "globex" in out["results"]
+
+
+def test_aggregate_across_allows_an_ordinary_dotted_group_by(monkeypatch, tmp_path):
+    _deny_credit_limit_for_acme(monkeypatch, tmp_path)
+    _patch_instances(monkeypatch)
+    out = server.aggregate_across_instances(
+        _ctx(),
+        model="res.partner",
+        group_by=["parent_id.name"],
+        measures=["id:count"],
+    )
+    assert "acme" not in out["errors"]
+    assert "acme" in out["results"]
+
+
 def test_search_across_still_answers_an_allowed_domain(monkeypatch, tmp_path):
     _deny_credit_limit_for_acme(monkeypatch, tmp_path)
     _patch_instances(monkeypatch)

@@ -6,6 +6,19 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **Field-ACL inference paths closed.** Several read paths could rank or count
+  records by a denied field without returning it:
+  - `diagnose_access` now runs `check_domain` on its count domain before any
+    Odoo call.
+  - The queued `index_knowledge` job checks its domain when it is submitted.
+  - A caller's `order` on `search_records` and `aggregate_records` is checked
+    term by term (the new `FieldPolicy.check_order`), with double-quoted names
+    and every dotted segment read through.
+  - `check_aggregate` now checks every dotted segment of a group-by or measure
+    name.
+  - `search_records` with no `order` on a governed model is pinned to `id`.
+
+  Refusals name only the model and fields. See `docs/field-acl.md`.
 - **`aggregate_records` rejected Odoo's own `__count` aggregate.** `measures:
   ["__count"]` was normalized to `"__count:sum"`, which Odoo answers with
   `Invalid field '__count' on model '<model>'` — an HTTP 500 naming a field

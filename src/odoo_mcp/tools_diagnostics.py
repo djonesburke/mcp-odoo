@@ -39,6 +39,7 @@ from .credential_lifecycle import (
     clamp_warn_days,
     classify_instance_kind,
 )
+from .field_policy import get_field_policy
 from .diagnostics import (
     analyze_upgrade_log_report,
     classify_access_error,
@@ -264,7 +265,18 @@ def diagnose_access(
             else normalized_domain
         )
 
-        _, odoo = _resolve_odoo(ctx, instance)
+        instance_name, odoo = _resolve_odoo(ctx, instance)
+        # Field ACL: the count over a caller's domain, set against
+        # expected_count, is a bisection oracle on a denied field.
+        domain_block = get_field_policy().check_domain(
+            instance_name, model, count_domain
+        )
+        if domain_block is not None:
+            return {
+                "success": False,
+                "tool": "diagnose_access",
+                "error": domain_block,
+            }
         metadata_errors: list[Dict[str, Any]] = []
 
         model_rows, error = _safe_odoo_read(

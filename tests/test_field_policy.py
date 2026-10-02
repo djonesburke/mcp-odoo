@@ -314,6 +314,105 @@ def test_check_domain_survives_a_malformed_domain():
         assert policy.check_domain("default", "hr.leave", junk) is None
 
 
+# --- check_order: sorting is a ranking of the withheld column --------------
+#
+# A masked column that cannot be read can still be sorted on, and the row
+# sequence is then the column's order. Same inference channel as a domain,
+# closed the same way (2026-10-02 adversarial review).
+
+
+def test_check_order_blocks_a_denied_field_in_any_term():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    for order in (
+        "wage",
+        "wage desc",
+        "name, wage DESC",
+        "name asc,  wage asc nulls last",
+    ):
+        err = policy.check_order("default", "hr.employee", order)
+        assert err is not None, order
+        assert "wage" in err and "hr.employee" in err
+
+
+def test_check_order_takes_every_segment_of_a_dotted_path():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    err = policy.check_order("default", "hr.employee", "contract_id.wage desc")
+    assert err is not None and "wage" in err
+    err = policy.check_order("default", "hr.employee", "wage.x")
+    assert err is not None and "wage" in err
+
+
+def test_check_order_reads_the_field_before_a_read_group_suffix():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    err = policy.check_order("default", "hr.employee", "wage:sum desc")
+    assert err is not None and "wage" in err
+    assert policy.check_order("default", "hr.employee", "create_date:month") is None
+    assert policy.check_order("default", "hr.employee", "__count desc, name") is None
+
+
+def test_check_order_sees_through_double_quoted_names():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    for order in ('"wage" desc', 'x,"wage"', '"contract_id"."wage"', '"wage":sum'):
+        err = policy.check_order("default", "hr.employee", order)
+        assert err is not None and "wage" in err, order
+    assert policy.check_order("default", "hr.employee", '"name" desc') is None
+
+
+def test_check_aggregate_checks_every_segment_of_a_dotted_path():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    for names in (["contract_id.wage"], ["wage.x"], ["contract_id.wage:sum"]):
+        err = policy.check_aggregate("default", "hr.employee", names)
+        assert err is not None and "wage" in err, names
+    assert (
+        policy.check_aggregate(
+            "default", "hr.employee", ["department_id.name", "create_date:month"]
+        )
+        is None
+    )
+
+
+def test_governs_reports_whether_any_rule_applies():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    assert policy.governs("default", "hr.employee") is True
+    assert policy.governs("default", "res.partner") is False
+    assert policy.governs("other", "hr.employee") is False
+
+
+def test_check_order_allows_ordinary_fields_and_empty_orders():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    assert policy.check_order("default", "hr.employee", "name desc, id") is None
+    assert policy.check_order("default", "hr.employee", None) is None
+    assert policy.check_order("default", "hr.employee", "") is None
+    assert policy.check_order("default", "hr.employee", " , ") is None
+
+
+def test_check_order_on_an_allow_list_refuses_everything_but_listed_and_id():
+    policy = make({"default": {"hr.employee": {"allow": ["name"]}}})
+    assert policy.check_order("default", "hr.employee", "name desc, id") is None
+    err = policy.check_order("default", "hr.employee", "write_date")
+    assert err is not None and "write_date" in err
+
+
+def test_check_order_refuses_a_non_string_on_a_governed_model():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    assert policy.check_order("default", "hr.employee", ["wage"]) is not None
+    # Models no rule applies to are pass-through.
+    assert policy.check_order("default", "res.partner", ["wage"]) is None
+
+
+def test_check_order_error_text_names_only_model_and_fields():
+    policy = make({"default": {"hr.employee": {"deny": ["wage"]}}})
+    err = policy.check_order("default", "hr.employee", "wage desc nulls last")
+    assert err is not None
+    assert "desc" not in err and "nulls" not in err
+    assert "hr.employee" in err and "ordering" in err
+
+
+def test_check_order_is_inert_without_a_policy():
+    policy = FieldPolicy({})
+    assert policy.check_order("default", "hr.employee", "wage desc") is None
+
+
 def test_restricted_fields_for_metadata_marking():
     policy = make({"default": {"res.partner": {"deny": ["credit_limit"]}}})
     restricted = policy.restricted_fields(

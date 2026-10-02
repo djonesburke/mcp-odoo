@@ -60,6 +60,10 @@ unprotected.
 | `search_records`, `read_record` | Denied fields removed from each record; response gains `redacted_fields: [...]`. |
 | `aggregate_records` | Grouping or aggregating on a denied field is **rejected** with a clear error (prevents value inference). |
 | **Domains**, on every read path | Filtering on a denied field is **rejected** before Odoo is read, on `search_records`, `aggregate_records`, `index_knowledge`, `search_across_instances`, `aggregate_across_instances` and the `odoo://search/...` resource. Redacting the output alone leaves the filter as an inference channel: narrow the rows to one denied value and every column still returned -- or the bare row count -- answers a question about it. **Every segment** of a dotted path is checked against the model being read (`employee_id.name` is checked as `employee_id` *and* `name`), and `any` / `not any` sub-domains are walked the same way -- Odoo rewrites `a.b.c op v` into `a any (b any (c op v))`, so the two spellings are one query and must check alike. A domain nested past the walk's depth cap is **refused**, not checked to the cap and passed. |
+| **Ordering** (`order`), on `search_records` and `aggregate_records` | Sorting by a denied field is **rejected** before Odoo is read: a sort is a ranking of the withheld column. Every term is checked (direction, `nulls first/last`, double-quoted names and `:granularity` / `:aggregate` suffixes are read through) and every segment of a dotted path is checked against the model being read. On a model the policy has rules for, `search_records` with no `order` is pinned to `id`, so the model's default order cannot follow a masked column. |
+| **Dotted aggregate fields** | `group_by` and measure names are cut at `:` and then into dotted segments, each checked against the model being read (`contract_id.wage` is refused when `wage` is denied), on `aggregate_records` and `aggregate_across_instances`. |
+| `diagnose_access` | A `domain` over a denied field is **rejected** before any Odoo call: a count set against `expected_count` would otherwise be a bisection oracle on the field. |
+| `index_knowledge`, including as a queued `submit_async_task` job | Same domain check; for the queued job it runs at submission, so a refused job is never queued. |
 | `get_model_fields` | Denied fields are **marked** `"access": "restricted"` (not hidden) so the agent knows the field exists and can explain the redaction; `restricted_fields` listed. |
 | `index_knowledge` | Denied fields are excluded before BM25 indexing, so their values are never cached or searchable. |
 | `odoo://record/...`, `odoo://search/...` resources | Denied fields removed; `_redacted_fields` noted. |
@@ -95,6 +99,14 @@ withheld, so it does not hallucinate their absence or values.
   it is not "fixed". It is also what closes a *loop-back* path, where the last
   hop returns to the model being read (`account_id.line_ids.name` on
   `account.analytic.line`) and asks the denied question outright.
+- **Ordering by an allowed many2one sorts by the related model's default
+  order.** The far model's own `_order` decides, and the policy for that model
+  is not consulted (the same far-model limit as above). Group-by ordering
+  follows the group-by fields themselves, which are checked.
+- **Only `search_records` pins the default order.** `search_across_instances`,
+  the `odoo://search/...` resource and `index_knowledge` take no `order` and
+  return rows in the model's default order, which can follow a masked column on
+  a governed model.
 - **A domain the walk cannot reach the bottom of is refused.** The walk is
   capped (a domain is caller data, not trusted nesting); past the cap the
   domain is rejected with an explanatory error rather than checked as far as

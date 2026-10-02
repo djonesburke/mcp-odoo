@@ -430,6 +430,14 @@ def search_records(
         )
         if domain_block is not None:
             return {"success": False, "error": domain_block}
+        # Sorting by a denied field ranks the rows by the withheld value.
+        order_block = get_field_policy().check_order(instance_name, model, order)
+        if order_block is not None:
+            return {"success": False, "error": order_block}
+        if not order and get_field_policy().governs(instance_name, model):
+            # No order means the model's default, which can follow a masked
+            # column; pin it to the one field that is never redactable.
+            order = "id"
         query_fields_used: Optional[List[str]] = None
         if query is not None and str(query).strip():
             metadata = _cached_fields_metadata(
@@ -697,6 +705,9 @@ def aggregate_records(
         )
         if domain_block is not None:
             return {"success": False, "error": domain_block}
+        order_block = get_field_policy().check_order(instance_name, model, order)
+        if order_block is not None:
+            return {"success": False, "error": order_block}
 
         major = odoo_major_version(odoo)
         method_used = "read_group"
