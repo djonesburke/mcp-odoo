@@ -88,6 +88,10 @@ def test_masked_set_is_exactly_this(acl):
     account.bank.statement and account.journal, plus the two presentations
     the review found still one call away -- account.account.current_balance
     and account.bank.statement.line.running_balance.
+
+    2026-10-08 added three keys on Dalton's SW-13 ruling (mask + rotate):
+    ir.config_parameter, fetchmail.server and ir.mail_server, each denying
+    only secret-bearing fields.
     """
     assert set(acl) == {
         "*",
@@ -112,7 +116,22 @@ def test_masked_set_is_exactly_this(acl):
         "account.account",
         "account.journal",
         "res.partner",
+        "ir.config_parameter",
+        "fetchmail.server",
+        "ir.mail_server",
     }
+
+
+def test_secret_values_are_denied(acl):
+    """SW-13 (2026-10-08): stored secrets are unreadable; 'key' stays open."""
+    assert acl["ir.config_parameter"]["deny"] == ["value"]
+    for model, must in (
+        ("fetchmail.server", {"password", "google_gmail_refresh_token", "microsoft_outlook_refresh_token"}),
+        ("ir.mail_server", {"smtp_pass", "smtp_ssl_private_key", "google_gmail_refresh_token", "microsoft_outlook_refresh_token"}),
+    ):
+        rule = acl[model]
+        assert "allow" not in rule
+        assert must <= set(rule["deny"]), f"{model} secret fields no longer masked"
 
 
 def test_bank_display_name_is_denied(acl):
