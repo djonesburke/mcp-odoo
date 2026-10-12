@@ -145,6 +145,15 @@ tool at deploy time. That is why `ODOO_MCP_TOOLS_EXCLUDE` is mandatory, and why
 Behavior 2 (§5) makes the filter fail closed: a silently-skipped filter would
 put `execute_method` back with no warning.
 
+**Staging exception.** The exclusion above is the production and bundle posture.
+The staging connection alone may carry `execute_method`, under a six-method
+side-effect allowlist (`allowed_side_effect_methods` in
+`config/field-acl-policy-staging.json`) and a `PreToolUse` guard hook
+(`~/.claude/hooks/staging-execute-method-guard.ps1`) that must be registered
+or Apply refuses and the posture check FAILs. Both live in `burke-mcp-deploy`
+(PR #13, SW-56), with `scripts/Apply-WritePosture.py` and
+`scripts/Check-OdooMcpPosture.py`; this repo does not carry or change them.
+
 ---
 
 ## 5. The five Burke write-safety behaviors
