@@ -21,6 +21,7 @@ from odoo_mcp.write_acl import (
     load_write_acl,
     parse_write_acl,
     report_write_acl,
+    reset_write_acl_snapshot,
     write_acl_posture,
 )
 from tests.test_server import FakeCtx
@@ -131,8 +132,11 @@ def policy(monkeypatch, tmp_path):
     monkeypatch.setenv("ODOO_MCP_ENABLE_WRITES", "1")
     monkeypatch.delenv("MCP_CHATTER_DIRECT", raising=False)
     monkeypatch.delenv("ODOO_MCP_ALLOW_UNKNOWN_METHODS", raising=False)
+    monkeypatch.delenv("ODOO_MCP_REQUIRE_WRITE_ACL", raising=False)
+    reset_write_acl_snapshot()
     _set(POLICY)
     yield _set
+    reset_write_acl_snapshot()
     reset_field_policy()
 
 
@@ -467,7 +471,7 @@ def test_malformed_file_refuses_every_write_and_aborts_startup(policy):
         _Client(), "product.supplierinfo", "write", values={"price": 1}, record_ids=[1]
     )
     assert report["success"] is False
-    assert "malformed" in report["error"]
+    assert "cannot be used" in report["error"]
     result = tools_write.chatter_post(
         FakeCtx(_Client()), model="x.y", record_id=1, body="Hi"
     )
@@ -508,3 +512,139 @@ def test_server_lifespan_aborts_on_a_malformed_write_acl(policy):
 
     with pytest.raises(WriteAclError):
         asyncio.run(_enter())
+
+
+# ---------------------------------------------------------------------------
+# Startup scope pinned; ODOO_MCP_REQUIRE_WRITE_ACL; every payload shape
+# ---------------------------------------------------------------------------
+
+
+def test_removing_the_key_at_runtime_does_not_unscope_a_started_server(policy):
+    report_write_acl()  # what the lifespan does at startup
+    policy({"field_acl": {}})
+    report = _validate(
+        _Client(),
+        "product.template",
+        "write",
+        values={"standard_price": 1},
+        record_ids=[1],
+    )
+    assert report["success"] is False
+    assert "['standard_price']" in report["error"]
+    chatter = tools_write.chatter_post(
+        FakeCtx(_Client()), model="product.template", record_id=1, body="Hi"
+    )
+    assert chatter["success"] is False
+
+
+def test_widening_the_file_at_runtime_does_not_widen_a_started_server(policy):
+    report_write_acl()
+    wider = json.loads(json.dumps(POLICY))
+    wider["write_acl"]["default"]["res.partner"] = {
+        "operations": {"write": {"fields": ["comment"], "max_records": 5}}
+    }
+    policy(wider)
+    report = _validate(
+        _Client(), "res.partner", "write", values={"comment": "x"}, record_ids=[1]
+    )
+    assert report["success"] is False
+    assert "res.partner is not writable" in report["error"]
+
+
+def test_narrowing_the_file_at_runtime_still_applies(policy):
+    report_write_acl()
+    narrower = json.loads(json.dumps(POLICY))
+    del narrower["write_acl"]["default"]["product.supplierinfo"]
+    policy(narrower)
+    report = _validate(
+        _Client(), "product.supplierinfo", "write", values={"price": 1}, record_ids=[1]
+    )
+    assert report["success"] is False
+
+
+def test_require_flag_refuses_when_the_key_is_absent(policy, monkeypatch):
+    monkeypatch.setenv("ODOO_MCP_REQUIRE_WRITE_ACL", "1")
+    policy({"field_acl": {}})
+    report = _validate(
+        _Client(), "res.partner", "write", values={"comment": "x"}, record_ids=[1]
+    )
+    assert report["success"] is False
+    assert "ODOO_MCP_REQUIRE_WRITE_ACL" in report["error"]
+    lines, fatal = report_write_acl()
+    assert fatal is not None
+
+
+def test_require_flag_refuses_when_the_file_is_missing(policy, monkeypatch, tmp_path):
+    monkeypatch.setenv("ODOO_MCP_REQUIRE_WRITE_ACL", "1")
+    monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(tmp_path / "gone.json"))
+    report = _validate(
+        _Client(), "res.partner", "write", values={"comment": "x"}, record_ids=[1]
+    )
+    assert report["success"] is False
+    _, fatal = report_write_acl()
+    assert fatal is not None
+
+
+def test_require_flag_is_quiet_when_the_key_is_present(policy, monkeypatch):
+    monkeypatch.setenv("ODOO_MCP_REQUIRE_WRITE_ACL", "1")
+    _, fatal = report_write_acl()
+    assert fatal is None
+    assert write_acl_posture()["required"] is True
+
+
+def test_guarded_field_in_a_batch_create_is_refused():
+    acl = parse_write_acl(
+        {
+            "write_acl": {
+                "default": {
+                    "product.template": {
+                        "operations": {
+                            "create": {"fields": ["name", "categ_id"], "max_records": 5}
+                        },
+                        "guards": [
+                            {
+                                "field": "categ_id",
+                                "comodel": "product.category",
+                                "must_match": ["x"],
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+    )
+    from odoo_mcp.write_acl import check_guards
+
+    refusal = check_guards(
+        acl,
+        None,
+        "default",
+        "product.template",
+        "create",
+        None,
+        None,
+        [{"name": "a"}, {"name": "b", "categ_id": 3}],
+    )
+    assert refusal is not None and "cannot be set on create" in refusal
+
+
+def test_values_and_values_list_are_both_checked():
+    acl = parse_write_acl(POLICY)
+    refusal = acl.check_write(
+        "default",
+        "product.supplierinfo",
+        "write",
+        values={"price": 1},
+        values_list=[{"standard_price": 2}],
+        record_ids=[1],
+    )
+    assert refusal is not None and "['standard_price']" in refusal
+    refusal = acl.check_write(
+        "default",
+        "product.supplierinfo",
+        "write",
+        values={"price": 1},
+        values_list=[{"price": 2}],
+        record_ids=list(range(6)),
+    )
+    assert refusal is not None and "6 records" in refusal

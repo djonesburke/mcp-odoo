@@ -686,7 +686,7 @@ def validate_write(
         if refusal is None and write_acl.governs(instance_name):
             _, guard_odoo = _resolve_odoo(ctx, instance)
             refusal = check_guards(
-                write_acl, guard_odoo, instance_name, model, operation, values, record_ids
+                write_acl, guard_odoo, instance_name, model, operation, values, record_ids, values_list
             )
         if refusal is not None:
             record_write_event(
@@ -992,7 +992,7 @@ def _execute_approved_write_gated(
         )
         if refusal is None and write_acl.governs(acl_instance):
             refusal = check_guards(
-                write_acl, odoo, acl_instance, model, operation, values, record_ids
+                write_acl, odoo, acl_instance, model, operation, values, record_ids, values_list
             )
         if refusal is not None:
             return {"success": False, "tool": "execute_approved_write", "error": refusal}

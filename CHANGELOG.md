@@ -45,7 +45,10 @@ All notable changes to this project will be documented in this file.
   they are equal on named fields. On a governed instance `chatter_post` is
   refused and `execute_method` runs read-only methods only. Checked on
   `preview_write`, `validate_write` and again on `execute_approved_write`
-  against the file as it reads then. A malformed block aborts startup.
+  against the file as it reads then, and against the scope loaded at
+  startup, so a runtime edit can narrow but never widen or remove it. A
+  malformed block aborts startup; `ODOO_MCP_REQUIRE_WRITE_ACL=1` makes a
+  missing file or key do the same.
   `health_check` reports it. No key, no change. See `docs/write-acl.md`.
 - **`allowed_side_effect_methods` can be scoped per instance.** It was a flat
   list applied to every configured instance, so allowing a method in order to

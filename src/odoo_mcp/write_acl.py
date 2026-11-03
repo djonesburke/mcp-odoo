@@ -50,7 +50,12 @@ Semantics:
   allowlist and ``ODOO_MCP_ALLOW_UNKNOWN_METHODS`` do not apply.
 - The policy is re-read on every check, and checked again at execute time, so
   tightening the file takes effect without a restart and a token validated
-  under an older file cannot execute past a newer one.
+  under an older file cannot execute past a newer one. The scope loaded at
+  startup is kept too, and a write must pass both: editing the file while the
+  server runs can narrow the scope but never widen or remove it.
+- ``ODOO_MCP_REQUIRE_WRITE_ACL=1`` makes the key mandatory: a missing file or
+  key aborts startup and, at runtime, refuses every write, as a malformed
+  block does. A scoped connector sets it, so deleting the key is no way out.
 - A malformed ``write_acl`` refuses every write at check time and aborts
   startup (:func:`report_write_acl`), as a malformed ``field_acl`` does.
 """
@@ -63,8 +68,10 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from .field_policy import field_policy_file_path
+from .tool_helpers import truthy_env
 
 WRITE_ACL_KEY = "write_acl"
+REQUIRE_WRITE_ACL_ENV = "ODOO_MCP_REQUIRE_WRITE_ACL"
 OPERATIONS = frozenset({"create", "write", "unlink"})
 # Context keys that cannot change which fields a write sets. Everything else
 # is refused: ``default_*`` keys set fields on create, and keys such as
@@ -162,14 +169,16 @@ class WriteAcl:
                     f"write_acl ({self.path}): context keys {extra} are not "
                     f"allowed on a scoped write (allowed: {sorted(ALLOWED_CONTEXT_KEYS)})."
                 )
-        entries: List[Dict[str, Any]] = []
+        # Every shape a caller can pass is checked, whichever one the
+        # operation actually uses: values and values_list both, and record_ids
+        # for any write or unlink.
+        entries: List[Dict[str, Any]] = [values] if values else []
         if values_list is not None:
-            entries = [entry for entry in values_list if isinstance(entry, dict)]
-            count = len(values_list)
+            entries += [entry for entry in values_list if isinstance(entry, dict)]
+        if op in {"write", "unlink"}:
+            count = len(list(record_ids or []))
         else:
-            if values:
-                entries = [values]
-            count = len(list(record_ids or [])) if op in {"write", "unlink"} else 1
+            count = len(values_list) if values_list is not None else 1
         if count > op_rule.max_records:
             return (
                 f"write_acl ({self.path}): {count} records exceeds the "
@@ -233,18 +242,36 @@ def check_guards(
     operation: str,
     values: Optional[Dict[str, Any]],
     record_ids: Optional[Iterable[Any]],
+    values_list: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[str]:
     """Return a refusal string unless every applicable guard holds.
 
     Reads the touched records' current ``field`` and the old and new
     ``comodel`` records through ``odoo``. Fails closed on every error.
     """
+    if isinstance(acl, WriteAclSet):
+        for member in acl.members:
+            refusal = check_guards(
+                member,
+                odoo,
+                instance,
+                model,
+                operation,
+                values,
+                record_ids,
+                values_list,
+            )
+            if refusal is not None:
+                return refusal
+        return None
     rule = acl.rule(instance, model)
     if rule is None or not rule.guards:
         return None
     op = str(operation or "").strip().lower()
+    create_entries = [values or {}]
+    create_entries += [e for e in values_list or [] if isinstance(e, dict)]
     for guard in rule.guards:
-        if op == "create" and values and guard.field in values:
+        if op == "create" and any(guard.field in entry for entry in create_entries):
             return (
                 f"write_acl ({acl.path}): {guard.field} cannot be set on create "
                 f"of {model} with this connector; it is guarded on write only."
@@ -437,7 +464,7 @@ def load_write_acl() -> WriteAcl:
 
 
 class _BrokenWriteAcl(WriteAcl):
-    """Stand-in for a malformed file: governs everything, allows nothing."""
+    """Stand-in for a malformed or required-but-missing scope: allows nothing."""
 
     def __init__(self, error: str) -> None:
         super().__init__({}, None)
@@ -446,25 +473,89 @@ class _BrokenWriteAcl(WriteAcl):
     def check_write(
         self, instance: str, model: str, *args: Any, **kwargs: Any
     ) -> Optional[str]:
-        return f"write_acl is malformed, so every write is refused: {self.error}"
+        return f"write_acl cannot be used, so every write is refused: {self.error}"
 
     def check_chatter(self, instance: str) -> Optional[str]:
-        return f"write_acl is malformed, so chatter_post is refused: {self.error}"
+        return f"write_acl cannot be used, so chatter_post is refused: {self.error}"
 
     def check_side_effect_method(
         self, instance: str, model: str, method: str
     ) -> Optional[str]:
-        return (
-            f"write_acl is malformed, so side-effect methods are refused: {self.error}"
+        return f"write_acl cannot be used, so side-effect methods are refused: {self.error}"
+
+
+class WriteAclSet(WriteAcl):
+    """Several scopes a write must satisfy at once (startup and current file)."""
+
+    def __init__(self, members: List[WriteAcl]) -> None:
+        super().__init__(None, None)
+        self.members = members
+
+    def active(self) -> bool:
+        return any(m.active() for m in self.members)
+
+    def governs(self, instance: str) -> bool:
+        return any(m.governs(instance) for m in self.members)
+
+    def check_write(self, *args: Any, **kwargs: Any) -> Optional[str]:
+        for member in self.members:
+            refusal = member.check_write(*args, **kwargs)
+            if refusal is not None:
+                return refusal
+        return None
+
+    def check_chatter(self, instance: str) -> Optional[str]:
+        for member in self.members:
+            refusal = member.check_chatter(instance)
+            if refusal is not None:
+                return refusal
+        return None
+
+    def check_side_effect_method(
+        self, instance: str, model: str, method: str
+    ) -> Optional[str]:
+        for member in self.members:
+            refusal = member.check_side_effect_method(instance, model, method)
+            if refusal is not None:
+                return refusal
+        return None
+
+
+# The scope the server started with (set by report_write_acl at startup).
+_startup_acl: Optional[WriteAcl] = None
+
+
+def reset_write_acl_snapshot() -> None:
+    """Drop the startup scope (intended for tests)."""
+    global _startup_acl
+    _startup_acl = None
+
+
+def _load_checked() -> WriteAcl:
+    """Load the file, then enforce ODOO_MCP_REQUIRE_WRITE_ACL; raise if unusable."""
+    acl = load_write_acl()
+    if truthy_env(REQUIRE_WRITE_ACL_ENV) and not acl.active():
+        raise WriteAclError(
+            f"{REQUIRE_WRITE_ACL_ENV} is set but the policy file "
+            f"({acl.path or 'none configured'}) has no '{WRITE_ACL_KEY}' key"
         )
+    return acl
 
 
 def current_write_acl() -> WriteAcl:
-    """The policy for this call; a malformed file yields a refuse-all policy."""
+    """The scope for this call: the startup scope and the file as it reads now.
+
+    A malformed file, or a missing scope while one is required, yields a
+    refuse-all policy. Once the server started scoped, the startup scope stays
+    in force, so the file can narrow it but not widen or remove it.
+    """
     try:
-        return load_write_acl()
+        current = _load_checked()
     except WriteAclError as exc:
-        return _BrokenWriteAcl(str(exc))
+        current = _BrokenWriteAcl(str(exc))
+    if _startup_acl is None or not _startup_acl.active():
+        return current
+    return WriteAclSet([_startup_acl, current])
 
 
 def write_acl_posture() -> Dict[str, Any]:
@@ -474,20 +565,30 @@ def write_acl_posture() -> Dict[str, Any]:
     except WriteAclError as exc:
         return {"active": True, "error": str(exc), "writable": {}}
     if not acl.active():
-        return {"active": False}
+        return {"active": False, "required": truthy_env(REQUIRE_WRITE_ACL_ENV)}
     writable: Dict[str, Dict[str, List[str]]] = {}
     for instance in acl.instances():
         writable[instance] = {
             model: sorted(rule.operations)
             for model, rule in sorted((acl._by_instance or {})[instance].items())
         }
-    return {"active": True, "file": acl.path, "writable": writable}
+    return {
+        "active": True,
+        "required": truthy_env(REQUIRE_WRITE_ACL_ENV),
+        "startup_scope_pinned": _startup_acl is not None and _startup_acl.active(),
+        "file": acl.path,
+        "writable": writable,
+    }
 
 
 def report_write_acl() -> Tuple[List[str], Optional[WriteAclError]]:
-    """Startup lines for write_acl plus a fatal error when it is malformed."""
+    """Startup lines for write_acl plus a fatal error when it is malformed.
+
+    Also records the startup scope that every later write must satisfy.
+    """
+    global _startup_acl
     try:
-        acl = load_write_acl()
+        acl = _load_checked()
     except WriteAclError as exc:
         return (
             [
@@ -496,6 +597,7 @@ def report_write_acl() -> Tuple[List[str], Optional[WriteAclError]]:
             ],
             exc,
         )
+    _startup_acl = acl
     if not acl.active():
         return (
             ["[odoo-mcp] write ACL: none — writes are not narrowed by model."],

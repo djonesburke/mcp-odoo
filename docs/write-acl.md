@@ -46,15 +46,18 @@ It is a key in the same policy file as `field_acl`
 | `chatter_post` | Refused on a governed instance. |
 | `execute_method` | Only methods the classifier calls read-only. The side-effect allowlist and `ODOO_MCP_ALLOW_UNKNOWN_METHODS` do not apply. |
 | Malformed `write_acl` | Startup aborts. If the file breaks while running, every write is refused. |
+| `ODOO_MCP_REQUIRE_WRITE_ACL=1` and no file or no key | Startup aborts; at runtime every write is refused. A scoped connector sets it. |
+| File edited while the server runs | A write must pass both the scope loaded at startup and the file as it reads now. Narrowing works at once; widening or deleting the key changes nothing until a restart, and with the require flag a restart without the key does not start. |
 
 ## Where it is checked
 
 `preview_write` (no token for an out-of-scope payload), `validate_write` (no
 approval stored; the guard runs here with the live client), and
 `execute_approved_write` (static check and guard again, against the file as it
-reads at that moment). The file is re-read on every check, so narrowing it
-takes effect without a restart, and a token validated under a wider file
-cannot execute after it narrows.
+reads at that moment, intersected with the scope loaded at startup). The
+file is re-read on every check, so narrowing it takes effect without a
+restart, and a token validated under a wider file cannot execute after it
+narrows; widening it does nothing until a restart.
 
 `health_check` reports `write_acl.active` and, per instance, the writable
 models and operations. Startup prints one `write ACL:` line.
@@ -66,3 +69,6 @@ models and operations. Startup prints one `write ACL:` line.
 - It does not prompt anyone. The per-call human prompt is the client's
   permission rule on `execute_approved_write`.
 - It does not check values beyond the guard. A price of 0 is a valid price.
+- It does not protect the policy file. Anyone, or any agent, who can edit the
+  file and restart the server can change the scope at that restart. The
+  deployment's posture check compares the installed file with the reviewed one.
