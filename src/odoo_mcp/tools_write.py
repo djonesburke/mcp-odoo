@@ -34,6 +34,7 @@ from .tool_helpers import (
     validate_method_name,
     validate_model_name,
 )
+from .write_acl import check_guards, current_write_acl
 from .write_policy import chatter_direct_enabled, side_effect_method_allowed, writes_enabled
 from .rate_limit import check_rate
 from .server_core import (
@@ -591,6 +592,26 @@ def preview_write(
     """
     try:
         validate_model_name(model)
+        refusal = current_write_acl().check_write(
+            _srv().resolve_instance_name(instance),
+            model,
+            operation,
+            values=values,
+            values_list=values_list,
+            record_ids=record_ids,
+            context=context,
+        )
+        if refusal is not None:
+            record_write_event(
+                "preview",
+                outcome="rejected",
+                model=model,
+                operation=str(operation).strip().lower(),
+                record_ids=[int(rid) for rid in record_ids or []],
+                instance=_srv().resolve_instance_name(instance),
+                detail=refusal,
+            )
+            return {"success": False, "tool": "preview_write", "error": refusal}
         report = build_write_preview_report(
             model=model,
             operation=operation,
@@ -648,6 +669,40 @@ def validate_write(
                     "Odoo metadata; call with use_live_metadata=True (the default) "
                     "and no explicit fields_metadata."
                 ),
+            }
+
+        # write_acl is checked here, after *_from_path names resolve to real
+        # fields, and before any approval can be stored for this payload.
+        write_acl = current_write_acl()
+        refusal = write_acl.check_write(
+            instance_name,
+            model,
+            operation,
+            values=values,
+            values_list=values_list,
+            record_ids=record_ids,
+            context=context,
+        )
+        if refusal is None and write_acl.governs(instance_name):
+            _, guard_odoo = _resolve_odoo(ctx, instance)
+            refusal = check_guards(
+                write_acl, guard_odoo, instance_name, model, operation, values, record_ids
+            )
+        if refusal is not None:
+            record_write_event(
+                "validate",
+                outcome="rejected",
+                model=model,
+                operation=str(operation).strip().lower(),
+                record_ids=[int(rid) for rid in record_ids or []],
+                instance=instance_name,
+                detail=refusal,
+            )
+            return {
+                "success": False,
+                "tool": "validate_write",
+                "error": refusal,
+                "approval_status": {"stored": False, "reason": "write_acl"},
             }
 
         metadata_source = "input" if fields_metadata is not None else "none"
@@ -922,6 +977,26 @@ def _execute_approved_write_gated(
         else:
             _, odoo = app_context.get_client(approval_instance)
 
+        # The token was minted under the write_acl of validate time; execute
+        # only if the file as it reads now still allows it, guard included.
+        acl_instance = approval_instance or _srv().resolve_default_instance_name()
+        write_acl = current_write_acl()
+        refusal = write_acl.check_write(
+            acl_instance,
+            model,
+            operation,
+            values=values or None,
+            values_list=values_list,
+            record_ids=record_ids,
+            context=context,
+        )
+        if refusal is None and write_acl.governs(acl_instance):
+            refusal = check_guards(
+                write_acl, odoo, acl_instance, model, operation, values, record_ids
+            )
+        if refusal is not None:
+            return {"success": False, "tool": "execute_approved_write", "error": refusal}
+
         result = odoo.execute_method(model, operation, *args, **kwargs)
         app_context.write_approvals.pop(str(approval.get("token", "")), None)
         return {
@@ -1012,6 +1087,9 @@ def chatter_post(
             }
 
         instance_name, odoo = _resolve_odoo(ctx, instance)
+        refusal = current_write_acl().check_chatter(instance_name)
+        if refusal is not None:
+            return {"success": False, "tool": "chatter_post", "error": refusal}
         validate_model_name(model)
         if record_id < 1:
             raise ValueError("record_id must be greater than 0")
@@ -1173,6 +1251,12 @@ def execute_method(
         if refusal is not None:
             return refusal
         review_required = safety["safety"] in {"side_effect", "unknown"}
+        if review_required:
+            acl_refusal = current_write_acl().check_side_effect_method(
+                instance_name, model, method
+            )
+            if acl_refusal is not None:
+                return {"success": False, "error": acl_refusal, "classification": safety}
         if (
             review_required
             and not side_effect_method_allowed(model, method, instance_name)

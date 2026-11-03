@@ -1,0 +1,515 @@
+"""Write-path model and field allowlist (``write_acl``), fail closed.
+
+The read-path ``field_acl`` (:mod:`field_policy`) decides what a profile may
+*see*. Nothing decided what a write-enabled profile may *change*: with
+``ODOO_MCP_ENABLE_WRITES=1`` every model and field the Odoo user can write was
+reachable through ``preview_write`` -> ``validate_write`` ->
+``execute_approved_write``, plus ``chatter_post`` and allowlisted side-effect
+methods. ``write_acl`` narrows a write-enabled profile to named record classes.
+
+It lives in the same policy file as ``field_acl`` (``ODOO_MCP_FIELD_POLICY_FILE``,
+else ``ODOO_MCP_POLICY_FILE``, else ``./odoo_mcp_policy.json``)::
+
+    {
+      "write_acl": {
+        "default": {
+          "product.supplierinfo": {
+            "operations": {
+              "create": {"fields": ["product_tmpl_id", "partner_id", "price"],
+                         "max_records": 20},
+              "write":  {"fields": ["price", "delay"], "max_records": 100}
+            }
+          },
+          "product.template": {
+            "operations": {"write": {"fields": ["categ_id", "barcode"],
+                                     "max_records": 100}},
+            "guards": [{"field": "categ_id", "comodel": "product.category",
+                        "must_match": ["property_cost_method"]}]
+          }
+        }
+      }
+    }
+
+Semantics:
+
+- **No ``write_acl`` key: no change.** Existing deployments are unaffected.
+- **A ``write_acl`` key governs every instance.** An instance with no entry may
+  write nothing; there is no ``*`` wildcard and no inherited fallback, so a
+  rule written for staging never opens production.
+- On a governed instance a write is refused unless its model is listed, its
+  operation is listed for that model, every value key is in that operation's
+  ``fields``, the record count is within ``max_records``, and the ``context``
+  carries no key outside :data:`ALLOWED_CONTEXT_KEYS` (a ``default_*`` key
+  would set a field the list does not name).
+- A **guard** applies when its ``field`` is in the values of a ``write``: every
+  touched record's current value of ``field`` and the new value must point at
+  ``comodel`` records that are equal on every ``must_match`` field. Any read
+  failure, missing record or missing field refuses the write.
+- ``chatter_post`` is refused on a governed instance, and ``execute_method``
+  runs only methods the classifier calls read-only there: the side-effect
+  allowlist and ``ODOO_MCP_ALLOW_UNKNOWN_METHODS`` do not apply.
+- The policy is re-read on every check, and checked again at execute time, so
+  tightening the file takes effect without a restart and a token validated
+  under an older file cannot execute past a newer one.
+- A malformed ``write_acl`` refuses every write at check time and aborts
+  startup (:func:`report_write_acl`), as a malformed ``field_acl`` does.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
+
+from .field_policy import field_policy_file_path
+
+WRITE_ACL_KEY = "write_acl"
+OPERATIONS = frozenset({"create", "write", "unlink"})
+# Context keys that cannot change which fields a write sets. Everything else
+# is refused: ``default_*`` keys set fields on create, and keys such as
+# ``tracking_disable`` hide the change from the record's chatter.
+ALLOWED_CONTEXT_KEYS = frozenset({"lang", "tz"})
+
+
+class WriteAclError(ValueError):
+    """Raised when a ``write_acl`` block is present but malformed (fail closed)."""
+
+
+@dataclass(frozen=True)
+class OperationRule:
+    fields: FrozenSet[str]
+    max_records: int
+
+
+@dataclass(frozen=True)
+class Guard:
+    field: str
+    comodel: str
+    must_match: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ModelWriteRule:
+    operations: Dict[str, OperationRule]
+    guards: Tuple[Guard, ...]
+
+
+class WriteAcl:
+    """Validated per-(instance, model) write rules."""
+
+    def __init__(
+        self,
+        by_instance: Optional[Dict[str, Dict[str, ModelWriteRule]]],
+        path: Optional[str] = None,
+    ) -> None:
+        # ``None`` means no write_acl key at all (pass-through); an empty
+        # mapping means the key is present and allows nothing anywhere.
+        self._by_instance = by_instance
+        self.path = path
+
+    def active(self) -> bool:
+        return self._by_instance is not None
+
+    def instances(self) -> List[str]:
+        return sorted(self._by_instance or {})
+
+    def governs(self, instance: str) -> bool:
+        """True when writes on ``instance`` are limited by this policy."""
+        return self._by_instance is not None
+
+    def rule(self, instance: str, model: str) -> Optional[ModelWriteRule]:
+        if self._by_instance is None:
+            return None
+        return self._by_instance.get(instance, {}).get(model)
+
+    def check_write(
+        self,
+        instance: str,
+        model: str,
+        operation: str,
+        values: Optional[Dict[str, Any]] = None,
+        values_list: Optional[List[Dict[str, Any]]] = None,
+        record_ids: Optional[Iterable[Any]] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Return a refusal string, or ``None`` when the payload is in scope.
+
+        Reads nothing from Odoo; guards are checked by :func:`check_guards`.
+        Refusals name the model, operation and field names, never a value.
+        """
+        if self._by_instance is None:
+            return None
+        op = str(operation or "").strip().lower()
+        rule = self.rule(instance, model)
+        if rule is None:
+            return (
+                f"write_acl ({self.path}): model {model} is not writable on "
+                f"instance '{instance}' with this connector."
+            )
+        op_rule = rule.operations.get(op)
+        if op_rule is None:
+            return (
+                f"write_acl ({self.path}): operation '{op}' is not allowed on "
+                f"{model} (allowed: {sorted(rule.operations) or 'none'})."
+            )
+        if context:
+            extra = sorted(
+                str(key) for key in context if key not in ALLOWED_CONTEXT_KEYS
+            )
+            if extra:
+                return (
+                    f"write_acl ({self.path}): context keys {extra} are not "
+                    f"allowed on a scoped write (allowed: {sorted(ALLOWED_CONTEXT_KEYS)})."
+                )
+        entries: List[Dict[str, Any]] = []
+        if values_list is not None:
+            entries = [entry for entry in values_list if isinstance(entry, dict)]
+            count = len(values_list)
+        else:
+            if values:
+                entries = [values]
+            count = len(list(record_ids or [])) if op in {"write", "unlink"} else 1
+        if count > op_rule.max_records:
+            return (
+                f"write_acl ({self.path}): {count} records exceeds the "
+                f"{op_rule.max_records}-record limit for {op} on {model}; split "
+                "the batch."
+            )
+        names: set[str] = set()
+        for entry in entries:
+            names.update(str(key) for key in entry)
+        denied = sorted(names - op_rule.fields)
+        if denied:
+            return (
+                f"write_acl ({self.path}): fields {denied} are not writable on "
+                f"{model} for {op} with this connector (allowed: "
+                f"{sorted(op_rule.fields)})."
+            )
+        return None
+
+    def check_chatter(self, instance: str) -> Optional[str]:
+        if self._by_instance is None:
+            return None
+        return (
+            f"write_acl ({self.path}): chatter_post is not available on instance "
+            f"'{instance}' with this connector; it is limited to the record "
+            "edits its write_acl lists."
+        )
+
+    def check_side_effect_method(
+        self, instance: str, model: str, method: str
+    ) -> Optional[str]:
+        if self._by_instance is None:
+            return None
+        return (
+            f"write_acl ({self.path}): {model}.{method} is not a read-only "
+            f"method, and instance '{instance}' runs only read-only methods "
+            "with this connector."
+        )
+
+
+def _id_of(value: Any) -> Any:
+    """Normalize a many2one read value ([id, name] / id / False) to an id."""
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else False
+    return value
+
+
+def _comparable(value: Any) -> Any:
+    """Make a read value comparable: many2one -> id, x2many -> sorted ids."""
+    if isinstance(value, (list, tuple)):
+        if len(value) == 2 and isinstance(value[0], int) and isinstance(value[1], str):
+            return value[0]
+        return tuple(sorted(value))
+    return value
+
+
+def check_guards(
+    acl: WriteAcl,
+    odoo: Any,
+    instance: str,
+    model: str,
+    operation: str,
+    values: Optional[Dict[str, Any]],
+    record_ids: Optional[Iterable[Any]],
+) -> Optional[str]:
+    """Return a refusal string unless every applicable guard holds.
+
+    Reads the touched records' current ``field`` and the old and new
+    ``comodel`` records through ``odoo``. Fails closed on every error.
+    """
+    rule = acl.rule(instance, model)
+    if rule is None or not rule.guards:
+        return None
+    op = str(operation or "").strip().lower()
+    for guard in rule.guards:
+        if op == "create" and values and guard.field in values:
+            return (
+                f"write_acl ({acl.path}): {guard.field} cannot be set on create "
+                f"of {model} with this connector; it is guarded on write only."
+            )
+        if op != "write" or not values or guard.field not in values:
+            continue
+        ids = [int(rid) for rid in record_ids or []]
+        new_id = _id_of(values[guard.field])
+        if not isinstance(new_id, int) or isinstance(new_id, bool) or not ids:
+            return (
+                f"write_acl ({acl.path}): {guard.field} on {model} must be set "
+                f"to one {guard.comodel} id on named records."
+            )
+        try:
+            current = odoo.execute_method(
+                model,
+                "read",
+                ids,
+                [guard.field],
+                context={"active_test": False},
+            )
+            old_ids = {_id_of(row.get(guard.field)) for row in current}
+            if len(current) != len(set(ids)):
+                return (
+                    f"write_acl ({acl.path}): could not read {guard.field} on "
+                    f"every {model} record; refusing the write."
+                )
+            if False in old_ids:
+                # No current target means nothing to compare against, so this
+                # is not a move between equal records. Ask Dalton.
+                return (
+                    f"write_acl ({acl.path}): some {model} records have no "
+                    f"{guard.field} now; setting a first {guard.comodel} is not a "
+                    "move between equal ones, so this connector refuses it. Ask Dalton."
+                )
+            category_ids = sorted({new_id, *old_ids})
+            categories = odoo.execute_method(
+                guard.comodel,
+                "read",
+                category_ids,
+                list(guard.must_match),
+                context={"active_test": False},
+            )
+        except Exception as exc:  # fail closed on any read error
+            return (
+                f"write_acl ({acl.path}): guard on {model}.{guard.field} could "
+                f"not be checked ({type(exc).__name__}); refusing the write."
+            )
+        by_id = {row.get("id"): row for row in categories if isinstance(row, dict)}
+        if set(by_id) != set(category_ids):
+            return (
+                f"write_acl ({acl.path}): {guard.comodel} records "
+                f"{sorted(set(category_ids) - set(by_id))} could not be read; "
+                "refusing the write."
+            )
+        target = by_id[new_id]
+        for old_id in sorted(old_ids):
+            source = by_id[old_id]
+            missing = [
+                name
+                for name in guard.must_match
+                if name not in source or name not in target
+            ]
+            if missing:
+                return (
+                    f"write_acl ({acl.path}): {guard.comodel} fields {missing} "
+                    "could not be read; refusing the write."
+                )
+            differ = [
+                name
+                for name in guard.must_match
+                if _comparable(source[name]) != _comparable(target[name])
+            ]
+            if differ:
+                return (
+                    f"write_acl ({acl.path}): moving {model} from {guard.comodel} "
+                    f"{old_id} to {new_id} changes {differ}; this connector moves "
+                    "only between categories equal on those fields. Ask Dalton."
+                )
+    return None
+
+
+def _parse_operation(where: str, spec: Any) -> OperationRule:
+    if not isinstance(spec, dict):
+        raise WriteAclError(f"{where} must be an object")
+    fields = spec.get("fields")
+    if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+        raise WriteAclError(f"{where}.fields must be a list of field names")
+    max_records = spec.get("max_records")
+    if (
+        not isinstance(max_records, int)
+        or isinstance(max_records, bool)
+        or max_records < 1
+    ):
+        raise WriteAclError(f"{where}.max_records must be a positive integer")
+    return OperationRule(
+        fields=frozenset(f.strip() for f in fields if f.strip()),
+        max_records=max_records,
+    )
+
+
+def _parse_guard(where: str, spec: Any) -> Guard:
+    if not isinstance(spec, dict):
+        raise WriteAclError(f"{where} must be an object")
+    field = spec.get("field")
+    comodel = spec.get("comodel")
+    must_match = spec.get("must_match")
+    if not isinstance(field, str) or not field.strip():
+        raise WriteAclError(f"{where}.field must be a field name")
+    if not isinstance(comodel, str) or not comodel.strip():
+        raise WriteAclError(f"{where}.comodel must be a model name")
+    if (
+        not isinstance(must_match, list)
+        or not must_match
+        or not all(isinstance(f, str) and f.strip() for f in must_match)
+    ):
+        raise WriteAclError(
+            f"{where}.must_match must be a non-empty list of field names"
+        )
+    return Guard(
+        field=field.strip(),
+        comodel=comodel.strip(),
+        must_match=tuple(f.strip() for f in must_match),
+    )
+
+
+def parse_write_acl(data: Dict[str, Any], path: Optional[str] = None) -> WriteAcl:
+    """Validate the ``write_acl`` block of a policy object."""
+    if WRITE_ACL_KEY not in data:
+        return WriteAcl(None, path)
+    acl = data[WRITE_ACL_KEY]
+    if not isinstance(acl, dict):
+        raise WriteAclError(f"'{WRITE_ACL_KEY}' must be an object")
+    by_instance: Dict[str, Dict[str, ModelWriteRule]] = {}
+    for instance, models in acl.items():
+        if not isinstance(models, dict):
+            raise WriteAclError(f"write_acl['{instance}'] must be an object")
+        rules: Dict[str, ModelWriteRule] = {}
+        for model, spec in models.items():
+            where = f"write_acl['{instance}']['{model}']"
+            if model == "*":
+                raise WriteAclError(f"{where}: no wildcard; name each model")
+            if not isinstance(spec, dict):
+                raise WriteAclError(f"{where} must be an object")
+            unknown = sorted(set(spec) - {"operations", "guards", "comment"})
+            if unknown:
+                raise WriteAclError(f"{where} has unknown keys {unknown}")
+            ops = spec.get("operations")
+            if not isinstance(ops, dict) or not ops:
+                raise WriteAclError(f"{where}.operations must be a non-empty object")
+            bad_ops = sorted(set(ops) - OPERATIONS)
+            if bad_ops:
+                raise WriteAclError(
+                    f"{where}.operations has unknown operations {bad_ops}"
+                )
+            guards_raw = spec.get("guards", [])
+            if not isinstance(guards_raw, list):
+                raise WriteAclError(f"{where}.guards must be a list")
+            rules[model] = ModelWriteRule(
+                operations={
+                    op: _parse_operation(f"{where}.operations.{op}", op_spec)
+                    for op, op_spec in ops.items()
+                },
+                guards=tuple(
+                    _parse_guard(f"{where}.guards[{i}]", g)
+                    for i, g in enumerate(guards_raw)
+                ),
+            )
+        by_instance[str(instance)] = rules
+    return WriteAcl(by_instance, path)
+
+
+def load_write_acl() -> WriteAcl:
+    """Load ``write_acl`` from the field-policy file; raise WriteAclError if malformed.
+
+    Re-read on every call: writes are rare next to reads, and a cached copy
+    would let a token validated under an older, wider file execute after the
+    file was narrowed.
+    """
+    path = field_policy_file_path()
+    if path is None:
+        return WriteAcl(None, None)
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WriteAclError(f"Cannot read write policy file {path}: {exc}")
+    if not isinstance(data, dict):
+        raise WriteAclError(f"Write policy file {path} must contain an object")
+    return parse_write_acl(data, path)
+
+
+class _BrokenWriteAcl(WriteAcl):
+    """Stand-in for a malformed file: governs everything, allows nothing."""
+
+    def __init__(self, error: str) -> None:
+        super().__init__({}, None)
+        self.error = error
+
+    def check_write(
+        self, instance: str, model: str, *args: Any, **kwargs: Any
+    ) -> Optional[str]:
+        return f"write_acl is malformed, so every write is refused: {self.error}"
+
+    def check_chatter(self, instance: str) -> Optional[str]:
+        return f"write_acl is malformed, so chatter_post is refused: {self.error}"
+
+    def check_side_effect_method(
+        self, instance: str, model: str, method: str
+    ) -> Optional[str]:
+        return (
+            f"write_acl is malformed, so side-effect methods are refused: {self.error}"
+        )
+
+
+def current_write_acl() -> WriteAcl:
+    """The policy for this call; a malformed file yields a refuse-all policy."""
+    try:
+        return load_write_acl()
+    except WriteAclError as exc:
+        return _BrokenWriteAcl(str(exc))
+
+
+def write_acl_posture() -> Dict[str, Any]:
+    """Non-secret posture: whether write_acl is active and what it names."""
+    try:
+        acl = load_write_acl()
+    except WriteAclError as exc:
+        return {"active": True, "error": str(exc), "writable": {}}
+    if not acl.active():
+        return {"active": False}
+    writable: Dict[str, Dict[str, List[str]]] = {}
+    for instance in acl.instances():
+        writable[instance] = {
+            model: sorted(rule.operations)
+            for model, rule in sorted((acl._by_instance or {})[instance].items())
+        }
+    return {"active": True, "file": acl.path, "writable": writable}
+
+
+def report_write_acl() -> Tuple[List[str], Optional[WriteAclError]]:
+    """Startup lines for write_acl plus a fatal error when it is malformed."""
+    try:
+        acl = load_write_acl()
+    except WriteAclError as exc:
+        return (
+            [
+                f"[odoo-mcp] WRITE ACL ERROR: {exc} — refusing to start rather "
+                "than running with an unreadable write scope."
+            ],
+            exc,
+        )
+    if not acl.active():
+        return (
+            ["[odoo-mcp] write ACL: none — writes are not narrowed by model."],
+            None,
+        )
+    posture = write_acl_posture()
+    scoped = "; ".join(
+        f"{instance}: {', '.join(models) or 'nothing'}"
+        for instance, models in posture["writable"].items()
+    )
+    return (
+        [
+            f"[odoo-mcp] write ACL: {acl.path} (writable models — {scoped or 'none'}; "
+            "an instance with no key writes nothing)"
+        ],
+        None,
+    )
