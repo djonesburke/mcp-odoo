@@ -12,7 +12,7 @@ import pytest
 
 from odoo_mcp.write_acl import WriteAclError, check_guards, parse_write_acl
 
-LINE_FIELDS = ["product_id", "name", "quantity", "price_unit"]
+LINE_FIELDS = ["product_id", "name", "quantity", "price_unit", "tax_ids"]
 
 POLICY = {
     "write_acl": {
@@ -38,6 +38,10 @@ POLICY = {
                         "comodel": "account.move.line",
                         "inverse": "move_id",
                         "fields": LINE_FIELDS,
+                        "id_list_fields": ["tax_ids"],
+                        "line_domain": [
+                            ["display_type", "in", ["product", "line_note"]]
+                        ],
                     }
                 },
             }
@@ -53,7 +57,9 @@ MOVES = {
     4: ("out_invoice", "draft"),
 }
 # line id -> move id
-LINES = {11: 1, 12: 1, 21: 2, 31: 3}
+LINES = {11: 1, 12: 1, 13: 1, 21: 2, 31: 3}
+# line 13 is bill 1's tax line
+DISPLAY = {11: "product", 12: "product", 13: "tax", 21: "product", 31: "product"}
 
 
 class _Odoo:
@@ -74,6 +80,10 @@ class _Odoo:
                 for rid, (mtype, state) in MOVES.items()
                 if rid in ids and mtype in types and state == "draft"
             ]
+        if model == "account.move.line" and method == "search":
+            domain = args[0]
+            ids, kinds = set(domain[0][2]), set(domain[1][2])
+            return [lid for lid in LINES if lid in ids and DISPLAY[lid] in kinds]
         if model == "account.move.line" and method == "read":
             return [
                 {"id": lid, "move_id": [LINES[lid], "M"]}
@@ -355,3 +365,68 @@ def test_rule_without_record_scope_is_unchanged():
         is None
     )
     assert odoo.calls == []
+
+
+# --- line value shapes and line domain (review round 1) ----------------------
+
+
+@pytest.mark.parametrize(
+    "taxes",
+    [[5, 6], [[6, 0, [5, 6]]], [(4, 5)], [[3, 5]], [[5]], [[4, 5, 0]], []],
+)
+def test_tax_ids_picking_existing_taxes_passes(acl, taxes):
+    values = {"invoice_line_ids": [[0, 0, {"name": "x", "tax_ids": taxes}]]}
+    assert (
+        acl.check_write("default", "account.move", "create", values, context=CTX)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "taxes",
+    [
+        [[0, 0, {"name": "T", "amount": 50}]],
+        [[1, 5, {"amount": 50}]],
+        [[2, 1, 0]],
+        [[6, 0, [5, "x"]]],
+        [[6, 0, 5]],
+        [True],
+        "5",
+        {"a": 1},
+        [[4, True]],
+    ],
+)
+def test_tax_ids_that_maintain_the_tax_table_are_refused(acl, taxes):
+    values = {"invoice_line_ids": [[0, 0, {"name": "x", "tax_ids": taxes}]]}
+    refusal = acl.check_write("default", "account.move", "create", values, context=CTX)
+    assert refusal and "tax_ids" in refusal
+
+
+@pytest.mark.parametrize("value", [[5], {"id": 5}, [[0, 0, {"name": "p"}]], (5, "P")])
+def test_scalar_line_fields_refuse_structures(acl, value):
+    values = {"invoice_line_ids": [[0, 0, {"product_id": value}]]}
+    refusal = acl.check_write("default", "account.move", "create", values, context=CTX)
+    assert refusal and "single value" in refusal
+
+
+def test_update_of_a_tax_line_is_refused(acl):
+    refusal = _write(acl, [1], {"invoice_line_ids": [[1, 13, {"price_unit": 1}]]})
+    assert refusal and "tax or payment-term" in refusal
+
+
+def test_update_of_product_lines_still_passes_with_line_domain(acl):
+    assert _write(acl, [1], {"invoice_line_ids": [[1, 11, {"price_unit": 1}]]}) is None
+
+
+@pytest.mark.parametrize(
+    "sub_patch",
+    [
+        {"id_list_fields": ["not_a_line_field"]},
+        {"id_list_fields": "tax_ids"},
+        {"line_domain": ["|", ["a", "=", 1], ["b", "=", 2]]},
+    ],
+)
+def test_malformed_line_rule_is_rejected(sub_patch):
+    sub = dict(BASE["one2many"]["invoice_line_ids"], **sub_patch)
+    with pytest.raises(WriteAclError):
+        parse_write_acl(_with(dict(BASE, one2many={"invoice_line_ids": sub})))

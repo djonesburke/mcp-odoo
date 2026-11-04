@@ -48,6 +48,9 @@ All notable changes to this project will be documented in this file.
   - `one2many` names a line field, its comodel, inverse and allowed line
     fields. Line commands are limited to create (0) and update (1); an update
     must name a line of the touched records. Every other command is refused.
+    `id_list_fields` limits a many2many line field (`tax_ids`) to picking
+    existing ids, and every other line value must be a single value;
+    `line_domain` limits which lines an update may touch.
 
   A rule without these keys behaves as before. See `docs/write-acl.md`.
 - **`write_acl`: a fail-closed model and field allowlist for writes.** A key

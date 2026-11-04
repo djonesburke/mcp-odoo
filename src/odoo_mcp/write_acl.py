@@ -107,6 +107,44 @@ class One2manyRule:
     comodel: str
     inverse: str
     fields: FrozenSet[str]
+    # Line fields that take a list of existing ids (a many2many such as
+    # tax_ids): only link, unlink, clear and replace-with-ids commands, never
+    # a nested create, update or delete. Every other line value is a scalar.
+    id_list_fields: FrozenSet[str] = frozenset()
+    # Every line an update (1) names must match this domain when read.
+    line_domain: Tuple[Any, ...] = ()
+
+
+def _is_int_id(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_id_list(value: Any) -> bool:
+    """A many2many value that only picks existing records.
+
+    A plain list of ids, or commands (6, 0, [ids]), (4, id), (3, id) and (5,).
+    A nested create (0), update (1) or delete (2) is refused: those maintain
+    the comodel's table, not the link.
+    """
+    if not isinstance(value, (list, tuple)):
+        return False
+    for item in value:
+        if _is_int_id(item):
+            continue
+        if not isinstance(item, (list, tuple)) or not item:
+            return False
+        code = item[0]
+        if code == 6 and len(item) == 3 and item[1] in (0, False):
+            ids = item[2]
+            if not isinstance(ids, (list, tuple)) or not all(map(_is_int_id, ids)):
+                return False
+        elif code in (3, 4) and len(item) in (2, 3) and _is_int_id(item[1]):
+            pass
+        elif code == 5 and len(item) in (1, 3):
+            pass
+        else:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -273,6 +311,21 @@ class WriteAcl:
                     f"writable on {model}.{name} with this connector (allowed: "
                     f"{sorted(sub.fields)})."
                 )
+            for key, value in sorted(line_values.items()):
+                if key in sub.id_list_fields:
+                    if not _is_id_list(value):
+                        return (
+                            f"write_acl ({self.path}): line field {key} on "
+                            f"{model}.{name} takes existing ids only (a list of "
+                            "ids, or commands 6, 4, 3 or 5) with this connector."
+                        )
+                elif value is not None and not isinstance(
+                    value, (bool, int, float, str)
+                ):
+                    return (
+                        f"write_acl ({self.path}): line field {key} on "
+                        f"{model}.{name} takes a single value with this connector."
+                    )
         return None
 
     def check_chatter(self, instance: str) -> Optional[str]:
@@ -377,6 +430,19 @@ def _check_record_scope(
                     f"write_acl ({acl.path}): {model}.{name} updates lines that "
                     f"do not belong to the {model} records named; refusing the write."
                 )
+            if sub.line_domain:
+                found = odoo.execute_method(
+                    sub.comodel,
+                    "search",
+                    [["id", "in", line_ids], *sub.line_domain],
+                    context={"active_test": False},
+                )
+                if sorted(int(i) for i in found or []) != line_ids:
+                    return (
+                        f"write_acl ({acl.path}): {model}.{name} updates lines "
+                        f"outside {list(sub.line_domain)} (for example tax or "
+                        "payment-term lines); refusing the write."
+                    )
     except Exception as exc:  # fail closed on any read error
         return (
             f"write_acl ({acl.path}): the scope of {model} records could not be "
@@ -596,9 +662,23 @@ def _parse_one2many(
         raise WriteAclError(f"{where} must be an object")
     rules: Dict[str, One2manyRule] = {}
     for name, sub in spec.items():
-        if not isinstance(sub, dict) or set(sub) - {"comodel", "inverse", "fields"}:
+        if not isinstance(sub, dict) or set(sub) - {
+            "comodel",
+            "inverse",
+            "fields",
+            "id_list_fields",
+            "line_domain",
+        }:
             raise WriteAclError(
-                f"{where}.{name} must be an object with comodel, inverse and fields"
+                f"{where}.{name} must be an object with comodel, inverse and "
+                "fields (and optionally id_list_fields, line_domain)"
+            )
+        id_lists = sub.get("id_list_fields", [])
+        if not isinstance(id_lists, list) or not all(
+            isinstance(f, str) and f in (sub.get("fields") or []) for f in id_lists
+        ):
+            raise WriteAclError(
+                f"{where}.{name}.id_list_fields must list names from its fields"
             )
         comodel, inverse, fields = (
             sub.get("comodel"),
@@ -619,6 +699,10 @@ def _parse_one2many(
             comodel=comodel.strip(),
             inverse=inverse.strip(),
             fields=frozenset(f.strip() for f in fields if f.strip()),
+            id_list_fields=frozenset(id_lists),
+            line_domain=_parse_record_domain(
+                f"{where}.{name}.line_domain", sub.get("line_domain", [])
+            ),
         )
     return rules
 
