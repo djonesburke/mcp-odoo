@@ -45,6 +45,10 @@ Semantics:
   touched record's current value of ``field`` and the new value must point at
   ``comodel`` records that are equal on every ``must_match`` field. Any read
   failure, missing record or missing field refuses the write.
+- **Record scope** (optional): ``create_context`` pins ``default_*`` keys a
+  create must carry; ``record_domain`` must match every record a write or
+  unlink names, read from Odoo; ``one2many`` limits line commands to create
+  and update, with listed line fields, on the touched records' own lines.
 - ``chatter_post`` is refused on a governed instance, and ``execute_method``
   runs only methods the classifier calls read-only there: the side-effect
   allowlist and ``ODOO_MCP_ALLOW_UNKNOWN_METHODS`` do not apply.
@@ -63,7 +67,7 @@ Semantics:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
@@ -97,9 +101,26 @@ class Guard:
 
 
 @dataclass(frozen=True)
+class One2manyRule:
+    """Line edits through a one2many: which line fields, and on which comodel."""
+
+    comodel: str
+    inverse: str
+    fields: FrozenSet[str]
+
+
+@dataclass(frozen=True)
 class ModelWriteRule:
     operations: Dict[str, OperationRule]
     guards: Tuple[Guard, ...]
+    # Context keys a create must carry, each pinned to allowed values. This
+    # is how a readonly selection such as account.move move_type is chosen:
+    # through its default_* key, never as a value.
+    create_context: Dict[str, FrozenSet[Any]] = field(default_factory=dict)
+    # Every record a write or unlink touches must match this domain when the
+    # guard reads it (for example state = draft).
+    record_domain: Tuple[Any, ...] = ()
+    one2many: Dict[str, One2manyRule] = field(default_factory=dict)
 
 
 class WriteAcl:
@@ -160,14 +181,20 @@ class WriteAcl:
                 f"write_acl ({self.path}): operation '{op}' is not allowed on "
                 f"{model} (allowed: {sorted(rule.operations) or 'none'})."
             )
+        pinned = rule.create_context if op == "create" else {}
+        allowed_context = ALLOWED_CONTEXT_KEYS | set(pinned)
         if context:
-            extra = sorted(
-                str(key) for key in context if key not in ALLOWED_CONTEXT_KEYS
-            )
+            extra = sorted(str(key) for key in context if key not in allowed_context)
             if extra:
                 return (
                     f"write_acl ({self.path}): context keys {extra} are not "
-                    f"allowed on a scoped write (allowed: {sorted(ALLOWED_CONTEXT_KEYS)})."
+                    f"allowed on a scoped write (allowed: {sorted(allowed_context)})."
+                )
+        for key, allowed_values in sorted(pinned.items()):
+            if (context or {}).get(key) not in allowed_values:
+                return (
+                    f"write_acl ({self.path}): a create on {model} must set context "
+                    f"{key} to one of {sorted(allowed_values)} with this connector."
                 )
         # Every shape a caller can pass is checked, whichever one the
         # operation actually uses: values and values_list both, and record_ids
@@ -195,6 +222,57 @@ class WriteAcl:
                 f"{model} for {op} with this connector (allowed: "
                 f"{sorted(op_rule.fields)})."
             )
+        for entry in entries:
+            for name, sub in sorted(rule.one2many.items()):
+                if name in entry:
+                    refusal = self._check_line_commands(
+                        model, op, name, sub, entry[name]
+                    )
+                    if refusal is not None:
+                        return refusal
+        return None
+
+    def _check_line_commands(
+        self, model: str, op: str, name: str, sub: One2manyRule, commands: Any
+    ) -> Optional[str]:
+        """Static shape check of one2many commands: create (0) and update (1) only.
+
+        Update ids are checked against the touched records by
+        :func:`check_guards`, which reads them.
+        """
+        bad = (
+            f"write_acl ({self.path}): {model}.{name} takes only create (0) and "
+            f"update (1) line commands with this connector, each with a values "
+            f"object limited to {sorted(sub.fields)}"
+        )
+        if not isinstance(commands, (list, tuple)):
+            return f"{bad}."
+        for command in commands:
+            if (
+                not isinstance(command, (list, tuple))
+                or len(command) != 3
+                or not isinstance(command[2], dict)
+            ):
+                return f"{bad}."
+            code, line_id, line_values = command
+            if code == 0 and line_id in (0, False):
+                pass
+            elif (
+                code == 1
+                and op == "write"
+                and isinstance(line_id, int)
+                and not isinstance(line_id, bool)
+            ):
+                pass
+            else:
+                return f"{bad}; update (1) is allowed only on a write."
+            denied = sorted(set(map(str, line_values)) - sub.fields)
+            if denied:
+                return (
+                    f"write_acl ({self.path}): line fields {denied} are not "
+                    f"writable on {model}.{name} with this connector (allowed: "
+                    f"{sorted(sub.fields)})."
+                )
         return None
 
     def check_chatter(self, instance: str) -> Optional[str]:
@@ -234,6 +312,79 @@ def _comparable(value: Any) -> Any:
     return value
 
 
+def _check_record_scope(
+    acl: WriteAcl,
+    odoo: Any,
+    model: str,
+    op: str,
+    rule: ModelWriteRule,
+    values: Optional[Dict[str, Any]],
+    record_ids: Optional[Iterable[Any]],
+) -> Optional[str]:
+    """Refuse unless every touched record matches ``record_domain`` and every
+    line a one2many update (1) names belongs to a touched record."""
+    if op not in {"write", "unlink"}:
+        return None
+    ids = sorted({int(rid) for rid in record_ids or []})
+    line_updates: Dict[str, List[int]] = {}
+    for name in rule.one2many:
+        commands = (values or {}).get(name)
+        if not isinstance(commands, (list, tuple)):
+            commands = []
+        line_updates[name] = sorted(
+            {
+                cmd[1]
+                for cmd in commands
+                if isinstance(cmd, (list, tuple))
+                and len(cmd) == 3
+                and cmd[0] == 1
+                and isinstance(cmd[1], int)
+                and not isinstance(cmd[1], bool)
+            }
+        )
+    if not rule.record_domain and not any(line_updates.values()):
+        return None
+    if not ids:
+        return f"write_acl ({acl.path}): a {op} on {model} must name its records."
+    try:
+        if rule.record_domain:
+            found = odoo.execute_method(
+                model,
+                "search",
+                [["id", "in", ids], *rule.record_domain],
+                context={"active_test": False},
+            )
+            if sorted(int(i) for i in found or []) != ids:
+                return (
+                    f"write_acl ({acl.path}): some {model} records are outside "
+                    f"this connector's scope {list(rule.record_domain)}; nothing "
+                    "was changed. Ask Dalton."
+                )
+        for name, line_ids in sorted(line_updates.items()):
+            if not line_ids:
+                continue
+            sub = rule.one2many[name]
+            lines = odoo.execute_method(
+                sub.comodel,
+                "read",
+                line_ids,
+                [sub.inverse],
+                context={"active_test": False},
+            )
+            owners = {_id_of(row.get(sub.inverse)) for row in lines or []}
+            if len(lines or []) != len(line_ids) or not owners <= set(ids):
+                return (
+                    f"write_acl ({acl.path}): {model}.{name} updates lines that "
+                    f"do not belong to the {model} records named; refusing the write."
+                )
+    except Exception as exc:  # fail closed on any read error
+        return (
+            f"write_acl ({acl.path}): the scope of {model} records could not be "
+            f"checked ({type(exc).__name__}); refusing the write."
+        )
+    return None
+
+
 def check_guards(
     acl: WriteAcl,
     odoo: Any,
@@ -265,9 +416,14 @@ def check_guards(
                 return refusal
         return None
     rule = acl.rule(instance, model)
-    if rule is None or not rule.guards:
+    if rule is None:
         return None
     op = str(operation or "").strip().lower()
+    refusal = _check_record_scope(acl, odoo, model, op, rule, values, record_ids)
+    if refusal is not None:
+        return refusal
+    if not rule.guards:
+        return None
     create_entries = [values or {}]
     create_entries += [e for e in values_list or [] if isinstance(e, dict)]
     for guard in rule.guards:
@@ -398,6 +554,75 @@ def _parse_guard(where: str, spec: Any) -> Guard:
     )
 
 
+def _parse_create_context(
+    where: str, spec: Any, ops: Dict[str, Any]
+) -> Dict[str, FrozenSet[Any]]:
+    if not isinstance(spec, dict):
+        raise WriteAclError(f"{where} must be an object")
+    if spec and "create" not in ops:
+        raise WriteAclError(f"{where} needs a create operation")
+    pinned: Dict[str, FrozenSet[Any]] = {}
+    for key, allowed in spec.items():
+        if not str(key).startswith("default_"):
+            raise WriteAclError(f"{where}: only default_* keys can be pinned")
+        if (
+            not isinstance(allowed, list)
+            or not allowed
+            or not all(isinstance(v, str) for v in allowed)
+        ):
+            raise WriteAclError(f"{where}.{key} must be a non-empty list of values")
+        pinned[str(key)] = frozenset(allowed)
+    return pinned
+
+
+def _parse_record_domain(where: str, spec: Any) -> Tuple[Any, ...]:
+    if not isinstance(spec, list) or not all(
+        isinstance(term, list)
+        and len(term) == 3
+        and isinstance(term[0], str)
+        and isinstance(term[1], str)
+        for term in spec
+    ):
+        # Plain [field, operator, value] terms only, implicitly ANDed: no
+        # '|' or '!' that could turn a narrowing domain into a wider one.
+        raise WriteAclError(f"{where} must be a list of [field, operator, value] terms")
+    return tuple(spec)
+
+
+def _parse_one2many(
+    where: str, spec: Any, ops: Dict[str, Any]
+) -> Dict[str, One2manyRule]:
+    if not isinstance(spec, dict):
+        raise WriteAclError(f"{where} must be an object")
+    rules: Dict[str, One2manyRule] = {}
+    for name, sub in spec.items():
+        if not isinstance(sub, dict) or set(sub) - {"comodel", "inverse", "fields"}:
+            raise WriteAclError(
+                f"{where}.{name} must be an object with comodel, inverse and fields"
+            )
+        comodel, inverse, fields = (
+            sub.get("comodel"),
+            sub.get("inverse"),
+            sub.get("fields"),
+        )
+        if not isinstance(comodel, str) or not comodel.strip():
+            raise WriteAclError(f"{where}.{name}.comodel must be a model name")
+        if not isinstance(inverse, str) or not inverse.strip():
+            raise WriteAclError(f"{where}.{name}.inverse must be a field name")
+        if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+            raise WriteAclError(f"{where}.{name}.fields must be a list of field names")
+        if not any(
+            name in (op_spec or {}).get("fields", []) for op_spec in ops.values()
+        ):
+            raise WriteAclError(f"{where}.{name} is not in any operation's fields")
+        rules[str(name)] = One2manyRule(
+            comodel=comodel.strip(),
+            inverse=inverse.strip(),
+            fields=frozenset(f.strip() for f in fields if f.strip()),
+        )
+    return rules
+
+
 def parse_write_acl(data: Dict[str, Any], path: Optional[str] = None) -> WriteAcl:
     """Validate the ``write_acl`` block of a policy object."""
     if WRITE_ACL_KEY not in data:
@@ -416,7 +641,17 @@ def parse_write_acl(data: Dict[str, Any], path: Optional[str] = None) -> WriteAc
                 raise WriteAclError(f"{where}: no wildcard; name each model")
             if not isinstance(spec, dict):
                 raise WriteAclError(f"{where} must be an object")
-            unknown = sorted(set(spec) - {"operations", "guards", "comment"})
+            unknown = sorted(
+                set(spec)
+                - {
+                    "operations",
+                    "guards",
+                    "comment",
+                    "create_context",
+                    "record_domain",
+                    "one2many",
+                }
+            )
             if unknown:
                 raise WriteAclError(f"{where} has unknown keys {unknown}")
             ops = spec.get("operations")
@@ -438,6 +673,15 @@ def parse_write_acl(data: Dict[str, Any], path: Optional[str] = None) -> WriteAc
                 guards=tuple(
                     _parse_guard(f"{where}.guards[{i}]", g)
                     for i, g in enumerate(guards_raw)
+                ),
+                create_context=_parse_create_context(
+                    f"{where}.create_context", spec.get("create_context", {}), ops
+                ),
+                record_domain=_parse_record_domain(
+                    f"{where}.record_domain", spec.get("record_domain", [])
+                ),
+                one2many=_parse_one2many(
+                    f"{where}.one2many", spec.get("one2many", {}), ops
                 ),
             )
         by_instance[str(instance)] = rules

@@ -36,6 +36,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`write_acl` record scope: pinned create context, `record_domain` and
+  one2many line rules.** Three optional keys on a model rule, built for a
+  draft-vendor-bill connector:
+  - `create_context` pins `default_*` context keys a create must carry, each
+    to a list of allowed values. This is how a readonly selection such as
+    `account.move.move_type` is chosen; the pinned keys are refused on write.
+  - `record_domain` is a list of plain `[field, operator, value]` terms. Every
+    record a write or unlink names must match it when the guard reads it
+    (`search` with `active_test` off), on validate and again on execute.
+  - `one2many` names a line field, its comodel, inverse and allowed line
+    fields. Line commands are limited to create (0) and update (1); an update
+    must name a line of the touched records. Every other command is refused.
+
+  A rule without these keys behaves as before. See `docs/write-acl.md`.
 - **`write_acl`: a fail-closed model and field allowlist for writes.** A key
   in the same policy file as `field_acl`. When present, every instance is
   governed: a write runs only if its model, operation and every value key are
