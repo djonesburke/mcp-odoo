@@ -39,6 +39,7 @@ from .write_policy import (
 )
 from .audit import audit_posture
 from .auth import auth_posture as oauth_posture
+from .write_acl import report_write_acl, write_acl_posture
 from .field_policy import (
     FieldPolicyError,
     field_policy_file_path,
@@ -197,10 +198,13 @@ async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     # closed (aborts) instead of silently running unprotected at first read,
     # and say which files answered — see report_policy_resolution.
     lines, fatal = report_policy_resolution()
-    for line in lines:
+    write_lines, write_fatal = report_write_acl()
+    for line in [*lines, *write_lines]:
         print(line, file=sys.stderr)
     if fatal is not None:
         raise fatal
+    if write_fatal is not None:
+        raise write_fatal
     yield AppContext()
 
 
@@ -696,6 +700,7 @@ def runtime_security_report() -> Dict[str, Any]:
         "audit_log": audit_posture(),
         "oauth": oauth_posture(),
         "field_acl": field_policy_posture(),
+        "write_acl": write_acl_posture(),
         "n_plus_one": n_plus_one_report(),
         "notes": [
             "HTTP transports are local-only by default in the CLI entry point.",
