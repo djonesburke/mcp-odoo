@@ -49,6 +49,35 @@ It is a key in the same policy file as `field_acl`
 | `ODOO_MCP_REQUIRE_WRITE_ACL=1` and no file or no key | Startup aborts; at runtime every write is refused. A scoped connector sets it. |
 | File edited while the server runs | A write must pass both the scope loaded at startup and the file as it reads now. Narrowing works at once; widening or deleting the key changes nothing until a restart, and with the require flag a restart without the key does not start. |
 
+## Record scope: pinned create context, record domain, line rules
+
+Three optional keys on a model rule narrow which records a write may touch,
+not only which fields:
+
+```json
+"account.move": {
+  "operations": {"create": {"fields": ["partner_id", "ref", "invoice_line_ids"], "max_records": 20},
+                 "write":  {"fields": ["partner_id", "ref", "invoice_line_ids"], "max_records": 20}},
+  "create_context": {"default_move_type": ["in_invoice", "in_refund"]},
+  "record_domain": [["move_type", "in", ["in_invoice", "in_refund"]], ["state", "=", "draft"]],
+  "one2many": {"invoice_line_ids": {"comodel": "account.move.line", "inverse": "move_id",
+                                    "fields": ["product_id", "name", "quantity", "price_unit", "tax_ids"],
+                                    "id_list_fields": ["tax_ids"],
+                                    "line_domain": [["display_type", "in", ["product", "line_section", "line_note"]]]}}
+}
+```
+
+| Key | Effect |
+|---|---|
+| `create_context` | A create must carry each named `default_*` key set to one of its listed values. A readonly selection (`move_type`) is chosen this way, never as a value. The keys are refused on write. |
+| `record_domain` | Plain `[field, operator, value]` terms, ANDed; no `|` or `!`. Every record a write or unlink names must match, read with `active_test` off on validate and again on execute. A read error refuses. |
+| `one2many` | Line commands on the named field are create `[0, 0, {...}]` and update `[1, id, {...}]` only, with line keys limited to `fields`. An update must name a line whose `inverse` is one of the touched records. Delete, unlink, link, clear and replace commands are refused. |
+| `one2many.id_list_fields` | Line fields that pick existing records (a many2many such as `tax_ids`): a plain list of ids, or commands `6`, `4`, `3`, `5`. A nested create, update or delete is refused. Every other line value must be a single value (string, number, boolean or null). |
+| `one2many.line_domain` | Plain terms every line an update names must match when read, for example `display_type in (product, line_section, line_note)`, so tax and payment-term lines are left to Odoo. |
+
+A create cannot set fields the operation does not list, so a state field left
+out of `fields` stays at Odoo's default (draft for `account.move`).
+
 ## Where it is checked
 
 `preview_write` (no token for an out-of-scope payload), `validate_write` (no
