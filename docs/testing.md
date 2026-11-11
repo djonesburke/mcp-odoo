@@ -12,7 +12,7 @@ uv run python -m mypy src
 uv run python -m pytest
 ```
 
-Always invoke these tools as `python -m <tool>` (through `uv run`, or the virtual environment's own `python`) rather than the generated console scripts (`pytest`, `ruff`, `mypy` in the environment's scripts folder). The console scripts can fail with `uv trampoline failed to canonicalize script path` when the virtual environment was created at a different path or the checkout was moved, while `python -m <tool>` keeps working. If you want the scripts, recreating the environment (for example with `uv sync`) should regenerate them.
+Always invoke these tools as `python -m <tool>` (through `uv run`, or the virtual environment's own `python`) rather than the generated console scripts (`pytest`, `mypy` in the environment's scripts folder). On Windows those scripts embed the absolute path of the environment's Python, so they fail with `uv trampoline failed to canonicalize script path` once the checkout or the virtual environment has been moved, while `python -m <tool>` keeps working. A plain `uv sync` reuses the existing environment and leaves the stale scripts in place; to regenerate them run `uv sync --extra dev --reinstall`, or delete `.venv` and run `uv sync --extra dev` again.
 
 Build and package checks:
 
