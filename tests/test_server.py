@@ -4,6 +4,7 @@ import json
 import xmlrpc.client
 from pathlib import Path
 
+import pytest
 from mcp import Client
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ElicitResult, TextContent
@@ -4466,3 +4467,60 @@ def test_aggregate_records_rejects_count_with_aggregator():
     assert result["success"] is False
     assert "__count" in result["error"]
     assert client.calls == []
+
+
+# ----- F9/F14: agent paths are validated before any filesystem touch ----
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        r"\\attacker.example\share\x",
+        "//attacker.example/share/x",
+        r"\\?\C:\x",
+        r"\\.\pipe\x",
+    ],
+)
+def test_unc_and_device_paths_rejected_before_resolve(monkeypatch, tmp_path, bad):
+    import pathlib
+
+    from odoo_mcp import server_core
+
+    monkeypatch.setenv("ODOO_ADDONS_PATHS", str(tmp_path))
+    monkeypatch.setenv("ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS", str(tmp_path))
+    real_resolve = pathlib.Path.resolve
+
+    def guarded(self, *a, **k):
+        if str(self).replace("\\", "/").startswith("//"):
+            raise AssertionError(f"resolve() touched the filesystem for {self}")
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "resolve", guarded)
+    with pytest.raises(ValueError, match="UNC and device paths"):
+        server_core.restrict_addons_paths([bad])
+    with pytest.raises(ValueError, match="UNC and device paths"):
+        server_core.restrict_attachment_upload_path(bad)
+
+
+def test_lexically_outside_path_rejected_without_resolve(monkeypatch, tmp_path):
+    import pathlib
+
+    from odoo_mcp import server_core
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "elsewhere" / "f.txt"
+    monkeypatch.setenv("ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS", str(root))
+    real_resolve = pathlib.Path.resolve
+    seen = []
+
+    def spy(self, *a, **k):
+        seen.append(str(self))
+        return real_resolve(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "resolve", spy)
+    with pytest.raises(ValueError, match="outside configured"):
+        server_core.restrict_attachment_upload_path(str(outside))
+    assert not any("elsewhere" in s for s in seen)
+    inside = root / "ok.txt"
+    assert server_core.restrict_attachment_upload_path(str(inside)) == inside.resolve()

@@ -447,7 +447,9 @@ def test_env_overrides_still_win_over_legacy_flat_config(
 
     clear_odoo_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "odoo_config.json").write_text(
+    # Env overrides apply to an explicit/home flat file, never to ./odoo_config.json.
+    explicit = tmp_path / "explicit.json"
+    explicit.write_text(
         json.dumps(
             {
                 "url": "http://local.test",
@@ -458,6 +460,7 @@ def test_env_overrides_still_win_over_legacy_flat_config(
             }
         )
     )
+    monkeypatch.setenv("ODOO_CONFIG_FILE", str(explicit))
     monkeypatch.setenv("ODOO_TRANSPORT", "json2")
     monkeypatch.setenv("ODOO_API_KEY", "env-key")
     monkeypatch.setattr(odoo_client_module, "OdooClient", FakeClient)
@@ -697,3 +700,53 @@ def test_missing_legacy_env_vars_reports_the_credential_pair_once(
 
     monkeypatch.setenv("ODOO_API_KEY", "key-value")
     assert odoo_client_module.missing_legacy_env_vars() == []
+
+
+# ----- F18: a ./odoo_config.json in the CWD is untrusted -----------------
+
+
+def _fake_home(monkeypatch, home):
+    real = __import__("os").path.expanduser
+
+    def fake(path):
+        if str(path).startswith("~"):
+            return str(home) + str(path)[1:]
+        return real(path)
+
+    monkeypatch.setattr("os.path.expanduser", fake)
+
+
+def test_home_config_wins_over_cwd_config(monkeypatch, tmp_path, odoo_client_module):
+    clear_odoo_env(monkeypatch)
+    home = tmp_path / "home"
+    (home / ".config" / "odoo").mkdir(parents=True)
+    (home / ".config" / "odoo" / "config.json").write_text(
+        json.dumps({"url": "https://real.test", "db": "real", "username": "u"})
+    )
+    _fake_home(monkeypatch, home)
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    (cwd / "odoo_config.json").write_text(
+        json.dumps({"url": "https://attacker.example", "db": "x", "username": "x"})
+    )
+
+    _, instances = odoo_client_module.load_instances_config()
+
+    assert instances["default"]["url"] == "https://real.test"
+
+
+def test_env_credentials_never_merged_into_cwd_config(
+    monkeypatch, tmp_path, odoo_client_module
+):
+    clear_odoo_env(monkeypatch)
+    _fake_home(monkeypatch, tmp_path / "empty-home")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "odoo_config.json").write_text(
+        json.dumps({"url": "https://attacker.example", "db": "x", "username": "x"})
+    )
+    monkeypatch.setenv("ODOO_API_KEY", "operator-secret")
+
+    _, instances = odoo_client_module.load_instances_config()
+
+    assert "api_key" not in instances["default"]

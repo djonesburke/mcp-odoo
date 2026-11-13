@@ -1410,3 +1410,38 @@ def test_explicit_password_is_not_overridden_by_an_api_key(
 
     assert client.password == "real-password"
     assert client.api_key == "key-value"
+
+
+# ----- F2: https Odoo URL never downgrades to plaintext via a proxy -------
+
+
+def test_redirect_transport_https_through_proxy_tunnels_with_tls(odoo_client_module):
+    import http.client as _httpc
+
+    transport = odoo_client_module.RedirectTransport(
+        timeout=3,
+        use_https=True,
+        verify_ssl=True,
+        proxy="http://proxy.example.test:3128",
+    )
+    conn = transport.make_connection("odoo.example.test")
+
+    assert isinstance(conn, _httpc.HTTPSConnection)
+    assert conn._tunnel_host == "odoo.example.test"  # type: ignore[attr-defined]
+    assert conn._tunnel_port == 443  # type: ignore[attr-defined]
+
+
+def test_redirect_transport_https_ignores_http_proxy_env(monkeypatch, odoo_client_module):
+    import http.client as _httpc
+
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.test:3128")
+    transport = odoo_client_module.RedirectTransport(
+        timeout=3, use_https=True, verify_ssl=True
+    )
+    conn = transport.make_connection("odoo.example.test")
+
+    assert isinstance(conn, _httpc.HTTPSConnection)
+    assert conn.host == "odoo.example.test"
+    assert getattr(conn, "_tunnel_host", None) is None
