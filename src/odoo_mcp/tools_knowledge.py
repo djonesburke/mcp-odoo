@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.server.mcpserver import Context
 
-from .field_policy import get_field_policy
+from .field_policy import comodel_resolver, get_field_policy
 from .knowledge_index import get_knowledge_store
 from .schemas import (
     IndexKnowledgeResponse,
@@ -94,7 +94,7 @@ def index_knowledge(
         # Field ACL: indexed output is redacted, but the domain choosing which
         # rows get indexed is an inference channel in its own right.
         domain_block = get_field_policy().check_domain(
-            instance_name, model, normalized_domain
+            instance_name, model, normalized_domain, comodel_resolver(odoo)
         )
         if domain_block is not None:
             return {

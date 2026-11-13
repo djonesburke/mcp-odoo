@@ -42,6 +42,7 @@ from .auth import auth_posture as oauth_posture
 from .write_acl import report_write_acl, write_acl_posture
 from .field_policy import (
     FieldPolicyError,
+    comodel_resolver,
     field_policy_file_path,
     field_policy_posture,
     get_field_policy,
@@ -808,11 +809,18 @@ def search_records_resource(model_name: str, domain: str) -> str:
         instance_name = _srv().resolve_default_instance_name()
         # Field ACL: refuse a domain over a denied field before Odoo is read.
         domain_block = get_field_policy().check_domain(
-            instance_name, model_name, domain_list
+            instance_name, model_name, domain_list, comodel_resolver(odoo_client)
         )
         if domain_block is not None:
             raise ValueError(domain_block)
-        results = odoo_client.search_read(model_name, domain_list, limit=10)
+        # On a model with rules the default order can follow a masked column,
+        # which would rank the rows by it; pin it to id, as search_records does.
+        if get_field_policy().governs(instance_name, model_name):
+            results = odoo_client.search_read(
+                model_name, domain_list, limit=10, order="id"
+            )
+        else:
+            results = odoo_client.search_read(model_name, domain_list, limit=10)
         filtered, redacted = get_field_policy().redact_records(
             instance_name, model_name, results
         )

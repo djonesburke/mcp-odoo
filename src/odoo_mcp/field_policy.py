@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from .write_policy import policy_file_path
 
@@ -49,8 +50,139 @@ SUBDOMAIN_OPERATORS = frozenset({"any", "not any", "any!", "not any!"})
 MAX_DOMAIN_DEPTH = 8
 
 
+# An aggregate or group-by name the policy can read: a plain field path. Odoo's
+# legacy ``read_group`` matches its ``fields`` entries with an unanchored
+# regex, so ``wage!`` reaches Odoo as ``wage``; anything else is refused.
+_FIELD_PATH_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+# Odoo stores a Binary field (``attachment=True``, the default) as an
+# ``ir.attachment`` row tagged ``res_model`` / ``res_field``. These columns of
+# that row are the field's content, or a way to fetch it.
+ATTACHMENT_MODEL = "ir.attachment"
+ATTACHMENT_CONTENT_FIELDS = frozenset(
+    {"datas", "raw", "db_datas", "index_content", "access_token", "checksum"}
+)
+
+# ``(model, field) -> comodel`` for a relational field, ``None`` for any other
+# field. Raises when the model's field metadata cannot be read.
+ComodelResolver = Callable[[str, str], Optional[str]]
+
+
 class DomainTooDeepError(ValueError):
     """Raised when a domain nests past :data:`MAX_DOMAIN_DEPTH` (fail closed)."""
+
+
+class UnresolvedRelationError(ValueError):
+    """Raised when a relation hop cannot be attributed to a model (fail closed)."""
+
+
+def comodel_resolver(client: Any) -> ComodelResolver:
+    """Build a :data:`ComodelResolver` over ``client.get_model_fields``.
+
+    Field metadata is read once per model for the life of the resolver, and
+    only when a caller's path actually hops through a relation.
+    """
+    cache: Dict[str, Dict[str, Any]] = {}
+
+    def resolve(model: str, field: str) -> Optional[str]:
+        metadata = cache.get(model)
+        if metadata is None:
+            metadata = client.get_model_fields(model)
+            if not isinstance(metadata, dict) or isinstance(
+                metadata.get("error"), str
+            ):
+                raise UnresolvedRelationError(model)
+            cache[model] = metadata
+        info = metadata.get(field)
+        relation = info.get("relation") if isinstance(info, dict) else None
+        return relation if isinstance(relation, str) and relation else None
+
+    return resolve
+
+
+def _path_model_fields(
+    model: str, segments: List[str], comodel_of: ComodelResolver
+) -> Tuple[List[Tuple[str, str]], str]:
+    """Attribute each segment of a dotted path to the model that owns it.
+
+    Returns the ``(model, field)`` pairs and the model owning the last
+    segment. A segment that is not relational (a date part, a property key)
+    keeps the path on the same model.
+    """
+    pairs: List[Tuple[str, str]] = []
+    current = model
+    for index, segment in enumerate(segments):
+        pairs.append((current, segment))
+        if index < len(segments) - 1:
+            current = comodel_of(current, segment) or current
+    return pairs, current
+
+
+def _domain_model_fields(
+    model: str, domain: Any, comodel_of: ComodelResolver, _depth: int = 0
+) -> List[Tuple[str, str]]:
+    """``(model, field)`` for every segment a domain filters on.
+
+    The comodel-aware twin of :func:`_domain_field_segments`: each hop of a
+    dotted path, and each ``any`` / ``not any`` sub-domain, is attributed to
+    the related model it really belongs to. Raises
+    :class:`UnresolvedRelationError` when a sub-domain's model cannot be
+    resolved, and :class:`DomainTooDeepError` past the depth cap.
+    """
+    if _depth > MAX_DOMAIN_DEPTH:
+        raise DomainTooDeepError(
+            f"domain nesting exceeds {MAX_DOMAIN_DEPTH} levels"
+        )
+    pairs: List[Tuple[str, str]] = []
+    if not isinstance(domain, (list, tuple)):
+        return pairs
+    for leaf in domain:
+        if isinstance(leaf, str) or not isinstance(leaf, (list, tuple)):
+            continue
+        if len(leaf) == 3 and isinstance(leaf[0], str):
+            name, operator, value = leaf
+            segments = [s.strip() for s in name.split(".") if s.strip()]
+            leaf_pairs, last_model = _path_model_fields(model, segments, comodel_of)
+            pairs.extend(leaf_pairs)
+            if (
+                isinstance(operator, str)
+                and operator.strip().lower() in SUBDOMAIN_OPERATORS
+            ):
+                target = comodel_of(last_model, segments[-1]) if segments else None
+                if not target:
+                    raise UnresolvedRelationError(name)
+                pairs.extend(
+                    _domain_model_fields(target, value, comodel_of, _depth + 1)
+                )
+            continue
+        pairs.extend(_domain_model_fields(model, leaf, comodel_of, _depth + 1))
+    return pairs
+
+
+def _domain_has_relation_hop(domain: Any, _depth: int = 0) -> bool:
+    """True when a domain reaches past the model being read.
+
+    A dotted name or a sub-domain operator. Anything nested past the depth
+    cap counts as a hop, so the caller walks it and refuses it there.
+    """
+    if _depth > MAX_DOMAIN_DEPTH:
+        return True
+    if not isinstance(domain, (list, tuple)):
+        return False
+    for leaf in domain:
+        if isinstance(leaf, str) or not isinstance(leaf, (list, tuple)):
+            continue
+        if len(leaf) == 3 and isinstance(leaf[0], str):
+            operator = leaf[1]
+            if "." in leaf[0] or (
+                isinstance(operator, str)
+                and operator.strip().lower() in SUBDOMAIN_OPERATORS
+            ):
+                return True
+            continue
+        if _domain_has_relation_hop(leaf, _depth + 1):
+            return True
+    return False
 
 
 def _domain_field_segments(domain: Any, _depth: int = 0) -> List[str]:
@@ -204,14 +336,60 @@ class FieldPolicy:
     def redact_record(
         self, instance: str, model: str, record: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], List[str]]:
-        """Return a copy of ``record`` with denied keys removed + their names."""
+        """Return a copy of ``record`` with denied keys removed + their names.
+
+        An ``ir.attachment`` row also loses its content columns when it backs
+        a field that is restricted on the model owning it
+        (:meth:`_attachment_masked_keys`).
+        """
+        masked = (
+            self._attachment_masked_keys(instance, record)
+            if model == ATTACHMENT_MODEL
+            else []
+        )
         effective = self._effective(instance, model)
-        if effective is None:
+        if effective is None and not masked:
             return record, []
         kept, redacted = self.filter_fields(instance, model, record.keys())
-        kept_set = set(kept)
+        kept_set = set(kept) - set(masked)
+        redacted = redacted + [name for name in masked if name not in redacted]
         filtered = {k: v for k, v in record.items() if k in kept_set}
         return filtered, redacted
+
+    def attachment_field_restricted(
+        self, instance: str, res_model: Any, res_field: Any
+    ) -> bool:
+        """True when an attachment backs a field restricted on its owner.
+
+        ``res_field`` empty means an ordinary attachment, which backs no
+        field. A field-backed row whose owning model is missing cannot be
+        judged and counts as restricted.
+        """
+        if not self._by_instance.get(instance) or not res_field:
+            return False
+        if not isinstance(res_model, str) or not res_model:
+            return True
+        return bool(self.restricted_fields(instance, res_model, [str(res_field)]))
+
+    def _attachment_masked_keys(
+        self, instance: str, record: Dict[str, Any]
+    ) -> List[str]:
+        """Content columns of an ``ir.attachment`` row that must be withheld.
+
+        Inert on an instance with no rules. Otherwise a row that carries
+        content but not its ``res_field`` column cannot be told apart from
+        one backing a masked field, so its content is withheld too.
+        """
+        if not self._by_instance.get(instance):
+            return []
+        present = [key for key in record if key in ATTACHMENT_CONTENT_FIELDS]
+        if not present:
+            return []
+        if "res_field" not in record or self.attachment_field_restricted(
+            instance, record.get("res_model"), record["res_field"]
+        ):
+            return present
+        return []
 
     def redact_records(
         self, instance: str, model: str, records: Iterable[Dict[str, Any]]
@@ -237,19 +415,38 @@ class FieldPolicy:
         return self._effective(instance, model) is not None
 
     def check_aggregate(
-        self, instance: str, model: str, fields: Iterable[str]
+        self,
+        instance: str,
+        model: str,
+        fields: Iterable[str],
+        comodel_of: Optional[ComodelResolver] = None,
     ) -> Optional[str]:
         """Return an error string if any aggregate/groupby field is denied.
 
         Each name is cut at ``:`` (granularity or aggregate suffix) and then
         into its dotted segments, every one checked against ``model`` as in
         :meth:`check_domain`: ``contract_id.wage`` reaches the denied field
-        through the relation.
+        through the relation. With ``comodel_of`` each segment past a relation
+        is also checked against the related model's own rules.
+
+        On an instance with rules, a name that is not a plain field path is
+        refused: Odoo's legacy ``read_group`` reads ``wage!`` as ``wage``, so
+        a decorated name would otherwise pass this check and still be summed.
         """
         names: List[str] = []
+        heads: List[str] = []
         for field in fields:
-            head = str(field).split(":", 1)[0]
+            head = str(field).split(":", 1)[0].strip()
+            heads.append(head)
             names.extend(s.strip() for s in head.split(".") if s.strip())
+        if self._by_instance.get(instance):
+            malformed = sorted({h for h in heads if not _FIELD_PATH_RE.match(h)})
+            if malformed:
+                return (
+                    f"Field policy cannot check {malformed} on {model}: an "
+                    "aggregate or group-by name must be a plain field path, "
+                    "so a denied field could be hidden in it."
+                )
         _, redacted = self.filter_fields(instance, model, names)
         if redacted:
             return (
@@ -257,10 +454,130 @@ class FieldPolicy:
                 f"{sorted(set(redacted))} on {model}; aggregation on restricted "
                 "fields is blocked to prevent inference."
             )
-        return None
+        if comodel_of is None or not self._by_instance.get(instance):
+            return None
+        dotted = [h.split(".") for h in heads if "." in h]
+        if not dotted:
+            return None
+        try:
+            pairs = [
+                pair
+                for segments in dotted
+                for pair in _path_model_fields(model, segments, comodel_of)[0]
+            ]
+        except Exception:
+            return self._unresolved_relation_error(model)
+        return self._related_block(instance, model, pairs, "aggregation on")
 
-    def check_domain(self, instance: str, model: str, domain: Any) -> Optional[str]:
+    def redact_aggregate_rows(
+        self, instance: str, model: str, rows: Iterable[Any]
+    ) -> List[Any]:
+        """Drop denied columns from ``read_group`` rows.
+
+        The request is refused up front when it names a denied field; this
+        covers a column Odoo adds unasked (legacy ``read_group`` with no
+        measures sums every numeric field). Keys starting ``__`` are Odoo's
+        own; ``<field>:<suffix>`` and ``<field>_count`` follow their field.
+        """
+        if self._effective(instance, model) is None:
+            return list(rows)
+
+        def restricted(key: str) -> bool:
+            head = key.split(":", 1)[0].split(".", 1)[0]
+            if not self.restricted_fields(instance, model, [head]):
+                return False
+            if not head.endswith("_count"):
+                return True
+            base = head[: -len("_count")]
+            return bool(self.restricted_fields(instance, model, [base]))
+
+        out: List[Any] = []
+        for row in rows:
+            if isinstance(row, dict):
+                row = {
+                    key: value
+                    for key, value in row.items()
+                    if not isinstance(key, str)
+                    or key.startswith("__")
+                    or not restricted(key)
+                }
+            out.append(row)
+        return out
+
+    def _unresolved_relation_error(self, model: str) -> str:
+        return (
+            f"Field policy cannot check this request on {model}: it reaches "
+            "through a relation whose related model could not be resolved, "
+            "so a denied field could be hidden behind it. The request is "
+            "refused rather than passed unchecked."
+        )
+
+    def _related_block(
+        self,
+        instance: str,
+        model: str,
+        pairs: Iterable[Tuple[str, str]],
+        verb: str,
+    ) -> Optional[str]:
+        """Error string when a ``(model, field)`` pair names a denied field."""
+        denied = sorted(
+            {
+                f"{owner}.{name}"
+                for owner, name in pairs
+                if self.restricted_fields(instance, owner, [name])
+            }
+        )
+        if not denied:
+            return None
+        return (
+            f"Field policy denies access to {denied}, reached through a "
+            f"relation from {model}; {verb} restricted fields is blocked to "
+            "prevent inference."
+        )
+
+    def check_domain(
+        self,
+        instance: str,
+        model: str,
+        domain: Any,
+        comodel_of: Optional[ComodelResolver] = None,
+    ) -> Optional[str]:
         """Return an error string if a domain filters on a denied field.
+
+        Two passes. The first (:meth:`_check_domain_outer`) judges every
+        segment against ``model`` and reads nothing from Odoo. The second runs
+        only when ``comodel_of`` is given, the instance has rules and the
+        domain hops through a relation: each segment is then also judged
+        against the related model it belongs to, so ``employee_id.wage`` from
+        a model with no rule on ``wage`` is refused when the employee model
+        denies it. A hop that cannot be resolved is refused.
+        """
+        block = self._check_domain_outer(instance, model, domain)
+        if block is not None:
+            return block
+        if (
+            comodel_of is None
+            or not self._by_instance.get(instance)
+            or not _domain_has_relation_hop(domain)
+        ):
+            return None
+        try:
+            pairs = _domain_model_fields(model, domain, comodel_of)
+        except DomainTooDeepError:
+            return (
+                f"Field policy cannot check this domain on {model}: its "
+                f"nesting exceeds {MAX_DOMAIN_DEPTH} levels, so a denied "
+                "field could be hidden below the limit. The domain is "
+                "refused rather than passed unchecked; flatten it and retry."
+            )
+        except Exception:
+            return self._unresolved_relation_error(model)
+        return self._related_block(instance, model, pairs, "filtering on")
+
+    def _check_domain_outer(
+        self, instance: str, model: str, domain: Any
+    ) -> Optional[str]:
+        """Check every domain segment against ``model``'s own rules.
 
         Redacting the *output* of a read leaves the filter itself as an
         inference channel: a domain on a denied field turns any column that

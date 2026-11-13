@@ -32,7 +32,7 @@ from .cross_instance import (
     select_instances,
     tag_and_merge,
 )
-from .field_policy import get_field_policy
+from .field_policy import comodel_resolver, get_field_policy
 from .rate_limit import check_rate
 from .schemas import (
     AccountingHealthAcrossInstancesResponse,
@@ -115,7 +115,9 @@ def run_search_across(app_context: Any, params: Dict[str, Any]) -> Dict[str, Any
         _guard_rate(name, "search_across_instances")
         # Field ACL: the rules are per instance, so the domain is checked
         # inside the worker, before this instance is read.
-        block = get_field_policy().check_domain(name, model, domain)
+        block = get_field_policy().check_domain(
+            name, model, domain, comodel_resolver(client)
+        )
         if block is not None:
             raise RuntimeError(block)
         records = client.search_read(model, domain, fields=fields, limit=limit)
@@ -162,16 +164,20 @@ def run_aggregate_across(app_context: Any, params: Dict[str, Any]) -> Dict[str, 
     def worker(instance: str) -> List[Dict[str, Any]]:
         name, client = app_context.get_client(instance)
         _guard_rate(name, "aggregate_across_instances")
-        block = policy.check_aggregate(name, model, referenced)
+        comodel_of = comodel_resolver(client)
+        block = policy.check_aggregate(name, model, referenced, comodel_of)
         if block is not None:
             raise RuntimeError(block)
-        domain_block = policy.check_domain(name, model, domain)
+        domain_block = policy.check_domain(name, model, domain, comodel_of)
         if domain_block is not None:
             raise RuntimeError(domain_block)
-        return list(
+        # Legacy read_group can add a column nobody named; drop denied ones.
+        return policy.redact_aggregate_rows(
+            name,
+            model,
             client.execute_method(
                 model, "read_group", domain, normalized_measures, group_by
-            )
+            ),
         )
 
     results, errors = _fan_out(selection.selected, worker)

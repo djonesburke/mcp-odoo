@@ -2566,10 +2566,12 @@ def test_access_permission_field_classifies_side_effect_methods_as_write():
     assert server.access_permission_field("action_confirm") == "perm_write"
 
 
-def test_access_permission_field_defaults_to_read_for_get_helpers():
+def test_access_permission_field_does_not_trust_the_get_prefix():
     server = importlib.import_module("odoo_mcp.server")
-    # safety = read_only (because of get_ prefix), so falls to perm_read
-    assert server.access_permission_field("get_thing") == "perm_read"
+    # A get_* name is no longer read_only by prefix (a get_* method can
+    # write), so it is diagnosed like any other unreviewed method.
+    assert server.access_permission_field("get_thing") == "perm_write"
+    assert server.access_permission_field("name_get") == "perm_read"
 
 
 # ----- _safe_odoo_read --------------------------------------------------

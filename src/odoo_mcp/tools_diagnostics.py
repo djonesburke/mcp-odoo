@@ -39,7 +39,7 @@ from .credential_lifecycle import (
     clamp_warn_days,
     classify_instance_kind,
 )
-from .field_policy import get_field_policy
+from .field_policy import comodel_resolver, get_field_policy
 from .diagnostics import (
     analyze_upgrade_log_report,
     classify_access_error,
@@ -269,7 +269,7 @@ def diagnose_access(
         # Field ACL: the count over a caller's domain, set against
         # expected_count, is a bisection oracle on a denied field.
         domain_block = get_field_policy().check_domain(
-            instance_name, model, count_domain
+            instance_name, model, count_domain, comodel_resolver(odoo)
         )
         if domain_block is not None:
             return {

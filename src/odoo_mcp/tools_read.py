@@ -18,7 +18,7 @@ from .agent_tools import (
     build_text_query_domain,
     rank_relevant_fields,
 )
-from .field_policy import get_field_policy
+from .field_policy import ATTACHMENT_MODEL, comodel_resolver, get_field_policy
 from .odoo_client import list_configured_instances
 from .rate_limit import check_rate, rate_report
 from .schemas import (
@@ -425,8 +425,9 @@ def search_records(
         normalized_domain = normalize_domain_input(domain)
         # Field ACL: refuse a domain over a denied field before Odoo is read.
         # Redacting the output alone leaves the filter as an inference channel.
+        comodel_of = comodel_resolver(odoo)
         domain_block = get_field_policy().check_domain(
-            instance_name, model, normalized_domain
+            instance_name, model, normalized_domain, comodel_of
         )
         if domain_block is not None:
             return {"success": False, "error": domain_block}
@@ -449,7 +450,7 @@ def search_records(
             # The free-text shortcut builds its own domain from the model's
             # searchable text fields, which can include a denied one.
             query_block = get_field_policy().check_domain(
-                instance_name, model, query_domain
+                instance_name, model, query_domain, comodel_of
             )
             if query_block is not None:
                 # Say whose domain was refused: the caller passed free text,
@@ -566,7 +567,7 @@ def read_attachment(
     URL-type attachments return their URL instead of content.
     """
     try:
-        _, odoo = _resolve_odoo(ctx, instance)
+        instance_name, odoo = _resolve_odoo(ctx, instance)
         if attachment_id < 1:
             raise ValueError("attachment_id must be greater than 0")
         rows = odoo.execute_method(
@@ -580,6 +581,7 @@ def read_attachment(
                 "type",
                 "url",
                 "res_model",
+                "res_field",
                 "res_id",
                 "checksum",
                 "create_date",
@@ -592,13 +594,40 @@ def read_attachment(
                 "error": f"Attachment not found: ir.attachment ID {attachment_id}",
             }
         attachment = rows[0]
+        # Field ACL: a Binary field is stored as an ir.attachment row tagged
+        # res_model/res_field, so a field masked on its owning model must not
+        # be readable here either. Refused before the content is fetched.
+        policy = get_field_policy()
+        if policy.attachment_field_restricted(
+            instance_name, attachment.get("res_model"), attachment.get("res_field")
+        ):
+            return {
+                "success": False,
+                "tool": "read_attachment",
+                "error": (
+                    f"Field policy restricts the field this attachment backs "
+                    f"({attachment.get('res_model')}."
+                    f"{attachment.get('res_field')}); its metadata and "
+                    "content are not available through this connection."
+                ),
+            }
+        attachment, _ = policy.redact_record(
+            instance_name, ATTACHMENT_MODEL, attachment
+        )
+        data_restricted = policy.restricted_fields(
+            instance_name, ATTACHMENT_MODEL, ["datas"]
+        )
         warnings: List[str] = []
         data_base64: Optional[str] = None
         cap = max_attachment_bytes()
         file_size = int(attachment.get("file_size") or 0)
         is_binary = str(attachment.get("type") or "binary") == "binary"
 
-        if include_data and is_binary:
+        if include_data and is_binary and data_restricted:
+            warnings.append(
+                "Field policy restricts 'datas' on ir.attachment; content omitted."
+            )
+        elif include_data and is_binary:
             if file_size > cap:
                 warnings.append(
                     f"Attachment is {file_size} bytes; cap is {cap} "
@@ -692,8 +721,9 @@ def aggregate_records(
         # channel, so reject it outright (groupby may carry a ":granularity").
         referenced_fields = [entry.split(":", 1)[0] for entry in group_by]
         referenced_fields += [field for field, _ in parsed_measures]
+        comodel_of = comodel_resolver(odoo)
         aggregate_block = get_field_policy().check_aggregate(
-            instance_name, model, referenced_fields
+            instance_name, model, referenced_fields, comodel_of
         )
         if aggregate_block is not None:
             return {"success": False, "error": aggregate_block}
@@ -701,7 +731,7 @@ def aggregate_records(
         # fields while the domain narrows the rows to one denied value, which
         # makes the aggregate itself the answer about that value.
         domain_block = get_field_policy().check_domain(
-            instance_name, model, normalized_domain
+            instance_name, model, normalized_domain, comodel_of
         )
         if domain_block is not None:
             return {"success": False, "error": domain_block}
@@ -763,6 +793,9 @@ def aggregate_records(
                 method_used = "read_group"
                 rows = odoo.execute_method(model, "read_group", **legacy_kwargs)
                 fallback_reason = str(exc)
+
+        # Legacy read_group can add a column nobody named; drop denied ones.
+        rows = get_field_policy().redact_aggregate_rows(instance_name, model, rows)
 
         return {
             "success": True,
