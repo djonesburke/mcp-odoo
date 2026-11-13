@@ -140,8 +140,9 @@ changing the code a server executes. Use the pinned install.
 allowlist check entirely**. An Odoo model method named `get_...` that in fact
 mutates data would therefore execute with no allowlist review.
 
-Upstream v1.3.0 still behaves this way. We do **not** patch it — we remove the
-tool at deploy time. That is why `ODOO_MCP_TOOLS_EXCLUDE` is mandatory, and why
+Upstream v1.3.0 still behaves this way. The Burke fork now classifies only an
+explicit read-only method list (SW-178, 2026-11), so a `get_*` method goes
+through the allowlist; the tool is still removed at deploy time. That is why `ODOO_MCP_TOOLS_EXCLUDE` is mandatory, and why
 Behavior 2 (§5) makes the filter fail closed: a silently-skipped filter would
 put `execute_method` back with no warning.
 
@@ -377,7 +378,8 @@ What this does **not** close:
   time-off records, calendar events and work entries are not masked.
 - **Curated tools and `execute_method`.** `search_employee` and similar tools
   return a fixed projection outside the redaction path. `execute_method`
-  bypasses both redaction and domain checks; it is safe only because §4
+  applies redaction and domain checks to its read-only methods only (SW-178);
+  a reviewed side-effect method returns its result unredacted, so §4 still
   excludes it.
 - **Instance keys.** Rules apply only to instance names present in the policy
   file; any other configured instance name is unmasked.

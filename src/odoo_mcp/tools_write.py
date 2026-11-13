@@ -12,7 +12,7 @@ import os
 import stat
 import xmlrpc.client
 from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
 from mcp.server.elicitation import ElicitationResult
 from mcp.server.mcpserver import Context, Elicit, Resolve
@@ -26,7 +26,7 @@ from .agent_tools import (
 )
 from .audit import record_write_event
 from .diagnostics import DESTRUCTIVE_METHODS, classify_method_safety
-from .field_policy import get_field_policy
+from .field_policy import comodel_resolver, get_field_policy
 from .tool_helpers import (
     max_attachment_upload_bytes,
     normalize_domain_input,
@@ -1187,6 +1187,104 @@ def chatter_post(
         return {"success": False, "error": str(e)}
 
 
+# Field ACL on execute_method's read-only methods. Where the caller may put
+# the domain and the order, by position (after the model) and by keyword.
+_ACL_DOMAIN_POSITION = {"search": 0, "search_count": 0, "search_read": 0, "name_search": 1}
+_ACL_DOMAIN_KWARGS = ("domain", "args")
+_ACL_ORDER_POSITION = {"search": 3, "search_read": 4}
+_ACL_RECORD_METHODS = {"read", "search_read"}
+# These return display labels, not field-keyed records, so nothing can be
+# redacted from them; name_search also matches on fields the caller never names.
+_ACL_LABEL_METHODS = {"name_search", "name_get"}
+
+
+def _execute_method_field_acl(
+    instance_name: str,
+    odoo: Any,
+    model: str,
+    method: str,
+    args: List[Any],
+    kwargs: Dict[str, Any],
+) -> Tuple[Optional[str], List[Any], Dict[str, Any]]:
+    """Apply the read-path field ACL to a read-only execute_method call.
+
+    Returns ``(refusal, args, kwargs)``. The same checks search_records makes:
+    the domain and the order are checked before Odoo is read, and a search on
+    a model with rules that names no order is pinned to ``id``. Inert on an
+    instance the policy has no rules for.
+    """
+    policy = get_field_policy()
+    governed = policy.governs(instance_name, model)
+    if governed and method in _ACL_LABEL_METHODS:
+        return (
+            f"Field policy has rules for {model}, and {method} returns "
+            "display labels that cannot be redacted field by field. Use "
+            "search_records/read_record, which are on the enforcement path.",
+            args,
+            kwargs,
+        )
+    domain_position = _ACL_DOMAIN_POSITION.get(method)
+    if domain_position is None:
+        return None, args, kwargs
+
+    comodel_of = comodel_resolver(odoo)
+    domains: List[Any] = []
+    if len(args) > domain_position:
+        args = list(args)
+        args[domain_position] = normalize_domain_input(args[domain_position])
+        domains.append(args[domain_position])
+    for key in _ACL_DOMAIN_KWARGS:
+        if kwargs.get(key) is not None:
+            kwargs = {**kwargs, key: normalize_domain_input(kwargs[key])}
+            domains.append(kwargs[key])
+    for domain in domains:
+        block = policy.check_domain(instance_name, model, domain, comodel_of)
+        if block is not None:
+            return block, args, kwargs
+
+    position = _ACL_ORDER_POSITION.get(method)
+    if position is None:
+        return None, args, kwargs
+    orders = [kwargs.get("order")]
+    if len(args) > position:
+        orders.append(args[position])
+    for order in orders:
+        block = policy.check_order(instance_name, model, order)
+        if block is not None:
+            return block, args, kwargs
+    if governed and not any(orders):
+        # No order means the model's default, which can follow a masked column.
+        if len(args) > position:
+            args = list(args)
+            args[position] = "id"
+        else:
+            kwargs = {**kwargs, "order": "id"}
+    return None, args, kwargs
+
+
+def _redact_execute_method_result(
+    instance_name: str, model: str, result: Any
+) -> Tuple[Any, List[str]]:
+    """Redact the records a read / search_read returned.
+
+    Raises when the result is not the list of records those methods return:
+    a shape that cannot be redacted is not passed through.
+    """
+    policy = get_field_policy()
+    rows = [result] if isinstance(result, dict) else result
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        if policy.governs(instance_name, model):
+            raise ValueError(
+                f"Field policy has rules for {model} and the result is not a "
+                "list of records, so it cannot be redacted and is withheld."
+            )
+        return result, []
+    redacted_rows, redacted_fields = policy.redact_records(instance_name, model, rows)
+    if isinstance(result, dict):
+        return redacted_rows[0], redacted_fields
+    return redacted_rows, redacted_fields
+
+
 @mcp.tool(
     description="Execute a custom method on an Odoo model",
     annotations=DESTRUCTIVE_TOOL,
@@ -1260,7 +1358,12 @@ def execute_method(
         if (
             review_required
             and not side_effect_method_allowed(model, method, instance_name)
-            and not truthy_env("ODOO_MCP_ALLOW_UNKNOWN_METHODS")
+            and not (
+                truthy_env("ODOO_MCP_ALLOW_UNKNOWN_METHODS")
+                # The escape hatch never applies to a model the field policy
+                # governs: an unreviewed method's result cannot be redacted.
+                and not get_field_policy().governs(instance_name, model)
+            )
         ):
             return {
                 "success": False,
@@ -1290,6 +1393,17 @@ def execute_method(
                 normalized_args[0] = normalize_domain_input(normalized_args[0])
                 args = normalized_args
 
+        # Field ACL: read-only methods are held to the same masking and
+        # inference checks as search_records/read_record. Reviewed side-effect
+        # methods are not record reads and are governed by their allowlist.
+        read_only = safety["safety"] == "read_only"
+        if read_only:
+            acl_refusal, args, kwargs = _execute_method_field_acl(
+                instance_name, odoo, model, method, list(args), kwargs
+            )
+            if acl_refusal is not None:
+                return {"success": False, "error": acl_refusal}
+
         try:
             result = odoo.execute_method(model, method, *args, **kwargs)
         except xmlrpc.client.Fault as fault:
@@ -1307,6 +1421,16 @@ def execute_method(
                     "payload is available. Verify state with a read if needed."
                 ),
             }
+        if read_only and method in _ACL_RECORD_METHODS:
+            result, redacted_fields = _redact_execute_method_result(
+                instance_name, model, result
+            )
+            if redacted_fields:
+                return {
+                    "success": True,
+                    "result": result,
+                    "redacted_fields": redacted_fields,
+                }
         return {"success": True, "result": result}
     except Exception as e:
         return {"success": False, "error": str(e)}

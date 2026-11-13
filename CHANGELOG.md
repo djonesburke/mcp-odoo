@@ -4,6 +4,61 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **Masked-field bypass paths closed** (2026-11-10 security scan, SW-178).
+  With no field policy none of this changes behaviour.
+  - **`execute_method` read-only methods are on the field-ACL path (F1).**
+    `search`, `search_count`, `search_read` and `name_search` have their
+    domain and `order` checked before Odoo is read (positional and keyword
+    forms); a search with no order on a model with rules is pinned to `id`;
+    `read` / `search_read` results are redacted and gain `redacted_fields`.
+    `name_search` and `name_get` are refused on a model with rules, since
+    their label pairs cannot be redacted.
+  - **`get_*` is no longer read-only by name (F10).** `classify_method_safety`
+    treats only the explicit `READ_ONLY_METHODS` set as read-only. A `get_*` /
+    `_get_*` method is `unknown`, so `execute_method` sends it through
+    `write_acl` and the reviewed side-effect allowlist like any other method.
+    `diagnose_access` consequently checks such an operation against
+    `perm_write`.
+  - **Attachment-backed binary fields (F13).** `read_attachment` refuses an
+    attachment whose `res_model` / `res_field` is a field the policy restricts
+    on the owning model, before fetching content, and now applies
+    `ir.attachment`'s own rules. Every redacting path (`search_records`,
+    `read_record`, resources, cross-instance search, the knowledge index,
+    `execute_method`) drops `datas`, `raw`, `db_datas`, `index_content`,
+    `access_token` and `checksum` from such a row, and from any
+    `ir.attachment` row returned without its `res_field` column on an
+    instance with rules.
+  - **Denied fields reached through a relation (F12).** `check_domain` and
+    `check_aggregate` take a comodel resolver (`comodel_resolver(client)`,
+    one `fields_get` per model hopped through, per call) and check each
+    segment of a dotted path or `any` sub-domain against the related model's
+    own rules, including from a model with no rule of its own. A hop that
+    cannot be resolved is refused. Every in-tree caller passes the resolver.
+  - **Decorated aggregate names (F6).** On an instance with rules a group-by
+    or measure name that is not a plain field path (`wage!`) is refused, and
+    `aggregate_records` / `aggregate_across_instances` drop denied columns
+    from the returned rows, which also covers legacy `read_group` summing
+    columns nobody named.
+  - **`odoo://search` default order (F17).** Pinned to `id` on a model with
+    rules, as `search_records` already was.
+- **XML-RPC to an `https://` Odoo URL no longer downgrades behind a proxy.**
+  `HTTP_PROXY` is now ignored for https URLs (use `HTTPS_PROXY`); the tunnel
+  is a TLS-wrapped CONNECT to port 443, so the password or API key is never
+  sent in plaintext.
+- **`addons_paths` and `*_from_path` values are validated before any
+  filesystem call.** UNC and device paths (`\\host\share`, `//host/share`,
+  `\\?\`, `\\.\`) are rejected by string check, and the raw path must sit
+  under a configured root before `Path.resolve()` runs, so Windows cannot be
+  made to open an SMB session (NTLM hash leak). A root reached only through a
+  symlink must now be spelled by its resolved path.
+- **`./odoo_config.json` is now the last config candidate**, after
+  `ODOO_CONFIG_FILE`, `~/.config/odoo/config.json` and `~/.odoo_config.json`,
+  and `ODOO_API_KEY`/`ODOO_TRANSPORT` env overrides are no longer merged into
+  it. Behavior change: a flat CWD file that relied on env overrides must move
+  to `ODOO_CONFIG_FILE` or a home config.
+
 ### Fixed
 
 - **Field-ACL inference paths closed.** Several read paths could rank or count
