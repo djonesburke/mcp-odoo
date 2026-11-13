@@ -1358,7 +1358,12 @@ def execute_method(
         if (
             review_required
             and not side_effect_method_allowed(model, method, instance_name)
-            and not truthy_env("ODOO_MCP_ALLOW_UNKNOWN_METHODS")
+            and not (
+                truthy_env("ODOO_MCP_ALLOW_UNKNOWN_METHODS")
+                # The escape hatch never applies to a model the field policy
+                # governs: an unreviewed method's result cannot be redacted.
+                and not get_field_policy().governs(instance_name, model)
+            )
         ):
             return {
                 "success": False,

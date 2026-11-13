@@ -204,6 +204,17 @@ def test_f10_reviewed_get_method_still_runs(policy, monkeypatch):
     assert out == {"success": True, "result": "url"}
 
 
+def test_allow_unknown_methods_does_not_open_governed_model(policy, monkeypatch):
+    # Review nit (SW-178): the escape hatch must not return a governed model's
+    # rows unredacted through an unreviewed method such as web_search_read.
+    monkeypatch.setenv("ODOO_MCP_ALLOW_UNKNOWN_METHODS", "1")
+    client = Client(result={"records": [{"id": 7, "wage": 99}]})
+    out = server.execute_method(FakeCtx(client), "hr.employee", "web_search_read", [])
+    assert out["success"] is False
+    assert "Unreviewed side-effect methods" in out["error"]
+    assert client.odoo_calls() == []
+
+
 # --- F13: attachment-backed binary fields ----------------------------------
 
 ID_CARD = {
