@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Security
+
+- **XML-RPC to an `https://` Odoo URL no longer downgrades behind a proxy.**
+  `HTTP_PROXY` is now ignored for https URLs (use `HTTPS_PROXY`); the tunnel
+  is a TLS-wrapped CONNECT to port 443, so the password or API key is never
+  sent in plaintext.
+- **`addons_paths` and `*_from_path` values are validated before any
+  filesystem call.** UNC and device paths (`\\host\share`, `//host/share`,
+  `\\?\`, `\\.\`) are rejected by string check, and the raw path must sit
+  under a configured root before `Path.resolve()` runs, so Windows cannot be
+  made to open an SMB session (NTLM hash leak). A root reached only through a
+  symlink must now be spelled by its resolved path.
+- **`./odoo_config.json` is now the last config candidate**, after
+  `ODOO_CONFIG_FILE`, `~/.config/odoo/config.json` and `~/.odoo_config.json`,
+  and `ODOO_API_KEY`/`ODOO_TRANSPORT` env overrides are no longer merged into
+  it. Behavior change: a flat CWD file that relied on env overrides must move
+  to `ODOO_CONFIG_FILE` or a home config.
+
 ### Fixed
 
 - **Field-ACL inference paths closed.** Several read paths could rank or count
