@@ -66,6 +66,8 @@ class BridgeConfig:
     #: Test only: also accept http://localhost redirects. Off by default.
     allow_localhost_redirects: bool = False
     extra_allowed_origins: tuple[str, ...] = ()
+    #: Odoo logins (casefolded) allowed to sign in. ``None``: any Odoo user.
+    allowed_logins: frozenset[str] | None = None
 
     @property
     def public_host(self) -> str:
@@ -88,6 +90,16 @@ def _networks(raw: str | None) -> tuple[str, ...]:
                 "ODOO_MCP_BRIDGE_TRUSTED_PROXIES must be a list of IPs or CIDRs"
             ) from exc
     return items or DEFAULT_TRUSTED_PROXIES
+
+
+def _logins(raw: str | None) -> frozenset[str] | None:
+    """Parse the sign-in allowlist; unset means any Odoo user may sign in."""
+    if raw is None or not raw.strip():
+        return None
+    items = frozenset(item.casefold() for item in _csv(raw))
+    if not items:
+        raise BridgeConfigError("ODOO_MCP_BRIDGE_ALLOWED_LOGINS is set but names no login")
+    return items
 
 
 def check_sdk_version(installed: str | None = None) -> None:
@@ -202,4 +214,5 @@ def load_config(env: Mapping[str, str] | None = None) -> BridgeConfig:
             in {"1", "true", "yes", "on"}
         ),
         extra_allowed_origins=_csv(source.get("ODOO_MCP_BRIDGE_ALLOWED_ORIGINS")),
+        allowed_logins=_logins(source.get("ODOO_MCP_BRIDGE_ALLOWED_LOGINS")),
     )

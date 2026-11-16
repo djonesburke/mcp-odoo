@@ -119,6 +119,16 @@ def build_bridge(
     runtime = runtime or make_runtime(config)
     runtime.audit.check_writable()
     trusted = TrustedProxies(config.trusted_proxies)
+    if config.allowed_logins is None:
+        print(
+            "odoo-mcp-bridge: sign-in allowlist off: any Odoo user with an API key may sign in",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"odoo-mcp-bridge: sign-in allowlist on: {len(config.allowed_logins)} login(s)",
+            file=sys.stderr,
+        )
     provider = BridgeOAuthProvider(
         seal_key=key,
         instance=config.instance,
@@ -129,6 +139,7 @@ def build_bridge(
         allow_localhost_redirects=config.allow_localhost_redirects,
         client_ip_header=config.client_ip_header,
         trusted_proxies=trusted,
+        allowed_logins=config.allowed_logins,
     )
     tools = apply_bridge_surface(runtime)
     undo = install_seams(runtime)

@@ -372,3 +372,27 @@ def test_client_cache_is_bounded():
     for i in range(5):
         cache.get_or_build(f"t{i}", time.time() + 100, object)
     assert len(cache) == 2
+
+
+def test_allowed_logins_parsed_casefolded(tmp_path):
+    from odoo_mcp.bridge.config import load_config
+
+    env = _env(tmp_path)
+    env["ODOO_MCP_BRIDGE_ALLOWED_LOGINS"] = " Ann@Example.com , bob@example.com ,"
+    cfg = load_config(env)
+    assert cfg.allowed_logins == frozenset({"ann@example.com", "bob@example.com"})
+
+
+def test_allowed_logins_unset_is_none(tmp_path):
+    from odoo_mcp.bridge.config import load_config
+
+    assert load_config(_env(tmp_path)).allowed_logins is None
+
+
+def test_allowed_logins_only_commas_refused(tmp_path):
+    from odoo_mcp.bridge.config import BridgeConfigError, load_config
+
+    env = _env(tmp_path)
+    env["ODOO_MCP_BRIDGE_ALLOWED_LOGINS"] = " , ,"
+    with pytest.raises(BridgeConfigError, match="names no login"):
+        load_config(env)
