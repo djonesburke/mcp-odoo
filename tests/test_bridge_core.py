@@ -160,7 +160,8 @@ def test_startup_refuses_missing_required(tmp_path):
         load_config(env)
 
 
-def test_startup_refuses_missing_or_loose_seal_key(tmp_path, capsys):
+def test_startup_refuses_missing_or_loose_seal_key(tmp_path, capsys, monkeypatch):
+    _pretend_tested_sdk(monkeypatch)
     env = _env(tmp_path)
     env["ODOO_MCP_BRIDGE_SEAL_KEY_FILE"] = str(tmp_path / "absent")
     assert cli.main([], env=env) != 0
@@ -294,9 +295,20 @@ def test_verify_login_separates_unreachable_from_bad_credentials(monkeypatch, er
     assert type(info.value) is expected
 
 
+def _pretend_tested_sdk(monkeypatch):
+    """Report the tested mcp version so a check after the SDK guard is reachable
+    whatever SDK the test environment happens to install (CI resolves mcp>=2,<3)."""
+    import importlib.metadata as md
+
+    real = md.version
+    monkeypatch.setattr(
+        "importlib.metadata.version",
+        lambda name: TESTED_MCP_VERSION if name == "mcp" else real(name),
+    )
+
+
 def test_sdk_version_check_names_both_versions():
-    check_sdk_version("2.0.0")
-    check_sdk_version()  # the installed SDK is the tested one
+    check_sdk_version(TESTED_MCP_VERSION)
     with pytest.raises(BridgeConfigError) as info:
         check_sdk_version("2.1.0")
     assert "2.1.0" in str(info.value) and TESTED_MCP_VERSION in str(info.value)
