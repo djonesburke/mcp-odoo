@@ -220,7 +220,8 @@ version, naming both versions (`TESTED_MCP_VERSION` in
 file), run the four bridge test files and the full suite:
 
 ```bash
-python -m pytest tests/test_bridge_core.py tests/test_bridge_oauth.py \n    tests/test_bridge_surface.py tests/test_bridge_hardening.py
+python -m pytest tests/test_bridge_core.py tests/test_bridge_oauth.py \
+    tests/test_bridge_surface.py tests/test_bridge_hardening.py
 python -m pytest
 ```
 
