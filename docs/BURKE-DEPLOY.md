@@ -13,7 +13,7 @@ pinned build across all Burke PCs.
 
 | | |
 |---|---|
-| Package version | `1.3.0+burke.22` |
+| Package version | `1.3.0+burke.23` |
 | Upstream base | `erpipe-org/mcp-odoo` tag `v1.3.0` |
 | Fork | `djonesburke/mcp-odoo`, branch `burke/hardening-1.3.0` |
 | Burke delta | five write-safety behaviors (§5) + read-path error surfacing (§8) + version readout + field-ACL policy + `check_api_key_expiry` (§9) + optional `ODOO_PASSWORD` (§10) + read-only team bundle (§12) + this doc |
@@ -62,7 +62,7 @@ Verify it is *this* build and not upstream or the Vauxoo package:
 odoo-mcp --version
 ```
 
-Expect `1.3.0+burke.22`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
+Expect `1.3.0+burke.23`. A bare `1.3.0` means PyPI upstream; anything `0.x` means
 you hit `odoo-mcp-multi`.
 
 ### Option B — explicit module invocation (immune to the name collision)
@@ -140,8 +140,9 @@ changing the code a server executes. Use the pinned install.
 allowlist check entirely**. An Odoo model method named `get_...` that in fact
 mutates data would therefore execute with no allowlist review.
 
-Upstream v1.3.0 still behaves this way. We do **not** patch it — we remove the
-tool at deploy time. That is why `ODOO_MCP_TOOLS_EXCLUDE` is mandatory, and why
+Upstream v1.3.0 still behaves this way. The Burke fork now classifies only an
+explicit read-only method list (SW-178, 2026-11), so a `get_*` method goes
+through the allowlist; the tool is still removed at deploy time. That is why `ODOO_MCP_TOOLS_EXCLUDE` is mandatory, and why
 Behavior 2 (§5) makes the filter fail closed: a silently-skipped filter would
 put `execute_method` back with no warning.
 
@@ -281,10 +282,10 @@ to gate, which is why the read-only rollout does not depend on either of them.
 Run on each machine after setup. No live Odoo write is performed.
 
 - [ ] `uv tool list` — confirm no shadowing `odoo-mcp-multi`, or plan to use §2 option B
-- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.22`** (a bare `1.3.0` is the wrong build)
-- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.22"`
+- [ ] `odoo-mcp --version` → **`odoo-mcp 1.3.0+burke.23`** (a bare `1.3.0` is the wrong build)
+- [ ] `odoo-mcp --health` exits 0 and its JSON shows `"package_version": "1.3.0+burke.23"`
 - [ ] In Claude, call `health_check` and confirm:
-  - [ ] `package_version` is `1.3.0+burke.22`
+  - [ ] `package_version` is `1.3.0+burke.23`
   - [ ] `field_acl.active` is `true` — if `false`, `ODOO_MCP_POLICY_FILE` is wrong and **all masking is off**
   - [ ] `side_effect_policy.error` is `null`
   - [ ] `tools_filtered` contains `execute_method`
@@ -377,7 +378,8 @@ What this does **not** close:
   time-off records, calendar events and work entries are not masked.
 - **Curated tools and `execute_method`.** `search_employee` and similar tools
   return a fixed projection outside the redaction path. `execute_method`
-  bypasses both redaction and domain checks; it is safe only because §4
+  applies redaction and domain checks to its read-only methods only (SW-178);
+  a reviewed side-effect method returns its result unredacted, so §4 still
   excludes it.
 - **Instance keys.** Rules apply only to instance names present in the policy
   file; any other configured instance name is unmasked.

@@ -66,7 +66,11 @@ unprotected.
 | `index_knowledge`, including as a queued `submit_async_task` job | Same domain check; for the queued job it runs at submission, so a refused job is never queued. |
 | `get_model_fields` | Denied fields are **marked** `"access": "restricted"` (not hidden) so the agent knows the field exists and can explain the redaction; `restricted_fields` listed. |
 | `index_knowledge` | Denied fields are excluded before BM25 indexing, so their values are never cached or searchable. |
-| `odoo://record/...`, `odoo://search/...` resources | Denied fields removed; `_redacted_fields` noted. |
+| `odoo://record/...`, `odoo://search/...` resources | Denied fields removed; `_redacted_fields` noted. `odoo://search` is pinned to `order=id` on a model with rules. |
+| **Relation paths** in domains, group-bys and measures | Each segment past a relation hop is also checked against the **related model's** rules (`employee_id.wage` from `res.users` is refused when `hr.employee` restricts `wage`), from governed and ungoverned models alike. The related model comes from one `fields_get` per model hopped through, read only when a path actually hops; a hop that cannot be resolved is **refused**. |
+| **Aggregate names and rows** | A group-by or measure name that is not a plain field path (`wage!`) is **rejected** on an instance with rules; denied columns are dropped from returned `read_group` rows. |
+| `ir.attachment` rows and `read_attachment` | An attachment backing a field restricted on its owning model (`res_model` / `res_field`) is **refused** by `read_attachment`; every redacting path drops its `datas`, `raw`, `db_datas`, `index_content`, `access_token` and `checksum`. A row returned without its `res_field` column loses the same columns, so request `res_model` and `res_field` alongside content. |
+| `execute_method` (where exposed) | Its read-only methods get the same domain, order and redaction treatment; `name_search` / `name_get` are refused on a model with rules. Reviewed side-effect methods return their result unredacted. |
 | `health_check` | `runtime.field_acl` reports whether ACL is active and how many instances have rules — never the policy contents. |
 
 `redacted_fields` notes are deliberate: the agent is told *that* fields were
@@ -103,10 +107,11 @@ withheld, so it does not hallucinate their absence or values.
   order.** The far model's own `_order` decides, and the policy for that model
   is not consulted (the same far-model limit as above). Group-by ordering
   follows the group-by fields themselves, which are checked.
-- **Only `search_records` pins the default order.** `search_across_instances`,
-  the `odoo://search/...` resource and `index_knowledge` take no `order` and
-  return rows in the model's default order, which can follow a masked column on
-  a governed model.
+- **Not every path pins the default order.** `search_records`, the
+  `odoo://search/...` resource and `execute_method` searches do.
+  `search_across_instances` and `index_knowledge` take no `order` and return
+  rows in the model's default order, which can follow a masked column on a
+  governed model.
 - **A domain the walk cannot reach the bottom of is refused.** The walk is
   capped (a domain is caller data, not trusted nesting); past the cap the
   domain is rejected with an explanatory error rather than checked as far as
@@ -114,15 +119,17 @@ withheld, so it does not hallucinate their absence or values.
   padded chain would hide a denied leaf. Models no rule applies to stay
   pass-through, depth included, so no policy file still means no behaviour
   change.
-- **A far-model field is not reached by this check.** A path that hops from an
-  *open* field on the model being read into a field the policy never names
-  (`employee_id.hourly_cost` from a model with no rule on `hourly_cost`)
-  passes: closing it needs comodel knowledge this module deliberately does not
-  fetch. Rule the far model directly, or keep the "never infer around a
-  refusal" instruction that governs the agent.
+- **A far-model field is checked against the far model's rules, and only
+  those.** A path that hops into a field no rule names
+  (`employee_id.hourly_cost` when nothing restricts `hourly_cost` on the
+  employee model) passes: rule the far model directly. Ordering is not
+  resolved this way (see above).
 - **`read_attachment`** returns attachment metadata + content. Field ACL
-  applies to the metadata dict; it does not parse attachment *payloads*. Do
-  not rely on it to redact secrets embedded inside attachment bytes.
+  refuses an attachment that backs a restricted field and applies
+  `ir.attachment`'s rules to the metadata dict; it does not parse attachment
+  *payloads*, and an ordinary attachment (no `res_field`) on a record of a
+  restricted model is still readable. Do not rely on it to redact secrets
+  embedded inside attachment bytes.
 - **Writes are governed by the write policy, not this one.** Field ACL is a
   read-path control. The gated write workflow (`preview_write` →
   `validate_write` → `execute_approved_write`) is unchanged; a field you hide

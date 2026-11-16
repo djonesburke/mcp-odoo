@@ -110,6 +110,13 @@ class FanoutClient:
     def execute_method(self, model, method, *args):
         return [{"partner_id": (1, "P"), "amount_residual": 200.0, "__count": 3}]
 
+    def get_model_fields(self, model):
+        # Relation metadata the field policy resolves dotted paths with.
+        return {
+            "name": {"type": "char"},
+            "parent_id": {"type": "many2one", "relation": "res.partner"},
+        }
+
 
 class FanoutAppContext:
     """App context whose get_client returns a per-instance fake client."""

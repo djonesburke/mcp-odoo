@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional
 
 from mcp.server.mcpserver import Context
 
-from .field_policy import get_field_policy
+from .field_policy import comodel_resolver, get_field_policy
 from .schemas import AsyncTaskResponse, ListAsyncTasksResponse
 from .accounting_tools import MAX_AGING_LINES, parse_as_of
 from .agent_tools import scan_addons_source_report
@@ -85,7 +85,9 @@ def _build_index_knowledge_job(
     instance_name, odoo = _resolve_odoo(ctx, instance)
     # Field ACL: same domain guard as the index_knowledge tool, applied at
     # submission so a queued job cannot index around it.
-    domain_block = get_field_policy().check_domain(instance_name, model, domain)
+    domain_block = get_field_policy().check_domain(
+        instance_name, model, domain, comodel_resolver(odoo)
+    )
     if domain_block is not None:
         raise ValueError(domain_block)
     app_context = _app_context(ctx)

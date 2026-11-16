@@ -694,7 +694,14 @@ class RedirectTransport(xmlrpc.client.Transport):
         self.use_https = use_https
         self.verify_ssl = verify_ssl
         self.max_redirects = max_redirects
-        self.proxy = proxy or os.environ.get("HTTP_PROXY")
+        # An https:// Odoo URL must only ever use an https proxy setting and a
+        # TLS-wrapped CONNECT tunnel; HTTP_PROXY never applies to it, or the
+        # XML-RPC body (including the credential) would travel in plaintext.
+        if use_https:
+            env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        else:
+            env_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        self.proxy = proxy or env_proxy
         self.context: Any = None
 
         if use_https and not verify_ssl:
@@ -712,9 +719,19 @@ class RedirectTransport(xmlrpc.client.Transport):
             if not proxy_url.hostname:
                 raise ValueError("Invalid HTTP_PROXY value")
             proxy_port = proxy_url.port or 80
-            connection = http.client.HTTPConnection(
-                proxy_url.hostname, proxy_port, timeout=self.timeout
-            )
+            if self.use_https:
+                # CONNECT to host:443, then TLS end to end with the target's
+                # certificate; the proxy only ever sees ciphertext.
+                connection: http.client.HTTPConnection = http.client.HTTPSConnection(
+                    proxy_url.hostname,
+                    proxy_port,
+                    timeout=self.timeout,
+                    context=self.context,
+                )
+            else:
+                connection = http.client.HTTPConnection(
+                    proxy_url.hostname, proxy_port, timeout=self.timeout
+                )
             connection.set_tunnel(host)
         else:
             if self.use_https and not self.verify_ssl:
@@ -852,8 +869,16 @@ def _apply_legacy_env_overrides(entry: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+_CWD_CONFIG_PATH = "./odoo_config.json"
+
+
 def _config_file_paths() -> list[str]:
-    """Config file candidates: explicit ODOO_CONFIG_FILE first, then standard paths."""
+    """Config file candidates: explicit ODOO_CONFIG_FILE, the user's home paths,
+    then ``./odoo_config.json`` last.
+
+    The working directory is attacker-influenced (an untrusted cloned repo), so
+    it is only a fallback and never receives environment credentials.
+    """
     paths = []
     explicit = os.environ.get("ODOO_CONFIG_FILE")
     if explicit:
@@ -865,9 +890,9 @@ def _config_file_paths() -> list[str]:
         paths.append(expanded)
     paths.extend(
         [
-            "./odoo_config.json",
             os.path.expanduser("~/.config/odoo/config.json"),
             os.path.expanduser("~/.odoo_config.json"),
+            _CWD_CONFIG_PATH,
         ]
     )
     return paths
@@ -947,9 +972,10 @@ def load_instances_config() -> tuple[str, dict[str, dict[str, Any]]]:
             ) from e
         if isinstance(raw, dict) and "instances" in raw:
             return _validate_instances(raw, expanded_path)
-        return "default", {
-            "default": _apply_legacy_env_overrides(cast(dict[str, Any], raw))
-        }
+        entry = cast(dict[str, Any], raw)
+        if path != _CWD_CONFIG_PATH:
+            entry = _apply_legacy_env_overrides(entry)
+        return "default", {"default": entry}
 
     # A partially-set environment is the common cause here, and reporting it as
     # "no configuration found" sends the reader hunting for a missing file that

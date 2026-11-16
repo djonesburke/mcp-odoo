@@ -78,11 +78,14 @@ def classify_method_safety(method: str) -> dict[str, Any]:
             "destructive_method": True,
             "confidence": "high",
         }
-    if method in READ_ONLY_METHODS or method.startswith(("get_", "_get_")):
+    # Read-only is an explicit list, never a name pattern: a ``get_*`` method
+    # can write (portal.mixin.get_portal_url mints an access token), so those
+    # fall through to "unknown" and go through the side-effect gates.
+    if method in READ_ONLY_METHODS:
         return {
             "safety": "read_only",
             "destructive_method": False,
-            "confidence": "high" if method in READ_ONLY_METHODS else "medium",
+            "confidence": "high",
         }
     if method == "message_post" or any(
         pattern.search(method) for pattern in SIDE_EFFECT_METHOD_PATTERNS

@@ -42,6 +42,7 @@ from .auth import auth_posture as oauth_posture
 from .write_acl import report_write_acl, write_acl_posture
 from .field_policy import (
     FieldPolicyError,
+    comodel_resolver,
     field_policy_file_path,
     field_policy_posture,
     get_field_policy,
@@ -482,6 +483,36 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return False
 
 
+def _confine_to_roots(raw_path: str, roots: List[Path], env_name: str) -> Path:
+    """Confine an agent-supplied path to ``roots`` without touching the filesystem first.
+
+    ``Path.resolve()`` calls into the OS, and on Windows a UNC path (two leading separators)
+    makes it open an SMB session (leaking the account's NTLM hash) before any
+    root check runs. So: reject UNC/device spellings by string, require the
+    lexical path to sit under a root, and only then resolve and re-check.
+    """
+    text = str(raw_path)
+    flat = text.replace("\\", "/")
+    if flat.startswith("//") or flat.startswith("/??/"):
+        raise ValueError(
+            f"UNC and device paths are not allowed; {env_name} accepts local "
+            "directories only."
+        )
+    expanded = os.path.normcase(os.path.abspath(os.path.expanduser(text)))
+    lexical_roots = []
+    for root in roots:
+        lexical_roots.append(os.path.normcase(str(root)))
+    if not any(
+        expanded == r or expanded.startswith(r.rstrip("/\\") + os.sep)
+        for r in lexical_roots
+    ):
+        raise ValueError(f"{raw_path} is outside configured {env_name} roots.")
+    candidate = Path(text).expanduser().resolve(strict=False)
+    if not any(candidate == root or _is_relative_to(candidate, root) for root in roots):
+        raise ValueError(f"{candidate} is outside configured {env_name} roots.")
+    return candidate
+
+
 def restrict_addons_paths(addons_paths: Optional[List[str]]) -> Optional[List[str]]:
     """Restrict source scans to ODOO_ADDONS_PATHS roots."""
     if addons_paths is None:
@@ -493,13 +524,7 @@ def restrict_addons_paths(addons_paths: Optional[List[str]]) -> Optional[List[st
         )
     restricted_paths: List[str] = []
     for raw_path in addons_paths:
-        candidate = Path(raw_path).expanduser().resolve(strict=False)
-        if not any(
-            candidate == root or _is_relative_to(candidate, root) for root in roots
-        ):
-            raise ValueError(
-                f"{candidate} is outside configured ODOO_ADDONS_PATHS roots."
-            )
+        candidate = _confine_to_roots(raw_path, roots, "ODOO_ADDONS_PATHS")
         restricted_paths.append(str(candidate))
     return restricted_paths
 
@@ -536,12 +561,7 @@ def restrict_attachment_upload_path(raw_path: str) -> Path:
             "*_from_path uploads require ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS to be "
             "set to one or more trusted local directories."
         )
-    candidate = Path(raw_path).expanduser().resolve(strict=False)
-    if not any(candidate == root or _is_relative_to(candidate, root) for root in roots):
-        raise ValueError(
-            f"{candidate} is outside configured ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS."
-        )
-    return candidate
+    return _confine_to_roots(raw_path, roots, "ODOO_MCP_ATTACHMENT_UPLOAD_ROOTS")
 
 
 # ---------------------------------------------------------------------------
@@ -808,11 +828,18 @@ def search_records_resource(model_name: str, domain: str) -> str:
         instance_name = _srv().resolve_default_instance_name()
         # Field ACL: refuse a domain over a denied field before Odoo is read.
         domain_block = get_field_policy().check_domain(
-            instance_name, model_name, domain_list
+            instance_name, model_name, domain_list, comodel_resolver(odoo_client)
         )
         if domain_block is not None:
             raise ValueError(domain_block)
-        results = odoo_client.search_read(model_name, domain_list, limit=10)
+        # On a model with rules the default order can follow a masked column,
+        # which would rank the rows by it; pin it to id, as search_records does.
+        if get_field_policy().governs(instance_name, model_name):
+            results = odoo_client.search_read(
+                model_name, domain_list, limit=10, order="id"
+            )
+        else:
+            results = odoo_client.search_read(model_name, domain_list, limit=10)
         filtered, redacted = get_field_policy().redact_records(
             instance_name, model_name, results
         )
