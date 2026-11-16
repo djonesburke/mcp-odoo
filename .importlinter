@@ -38,6 +38,7 @@ forbidden_modules =
     odoo_mcp.tools_async
     odoo_mcp.prompts
     odoo_mcp.prompts_workflows
+    odoo_mcp.bridge
 
 [importlinter:contract:surface-layering]
 name = MCP surface layering (server above tool modules above core)
