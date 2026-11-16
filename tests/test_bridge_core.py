@@ -393,6 +393,7 @@ def test_allowed_logins_only_commas_refused(tmp_path):
     from odoo_mcp.bridge.config import BridgeConfigError, load_config
 
     env = _env(tmp_path)
-    env["ODOO_MCP_BRIDGE_ALLOWED_LOGINS"] = " , ,"
-    with pytest.raises(BridgeConfigError, match="names no login"):
-        load_config(env)
+    for value in (" , ,", "", "   "):
+        env["ODOO_MCP_BRIDGE_ALLOWED_LOGINS"] = value
+        with pytest.raises(BridgeConfigError, match="names no login"):
+            load_config(env)

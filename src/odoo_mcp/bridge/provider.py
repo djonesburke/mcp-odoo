@@ -170,7 +170,7 @@ class BridgeOAuthProvider:
         self._allow_localhost = allow_localhost_redirects
         self._ip_header = client_ip_header.lower() if client_ip_header else None
         self._allowed_logins = (
-            None if allowed_logins is None else frozenset(x.casefold() for x in allowed_logins)
+            None if allowed_logins is None else frozenset(x.lower() for x in allowed_logins)
         )
         self._clock = clock
         self._lock = threading.Lock()
@@ -189,7 +189,8 @@ class BridgeOAuthProvider:
 
     def login_allowed(self, login: str) -> bool:
         """True when the sign-in allowlist is off or names this login."""
-        return self._allowed_logins is None or login.casefold() in self._allowed_logins
+        # ``lower()``, not ``casefold()``: the same rule the Odoo verifier uses.
+        return self._allowed_logins is None or login.strip().lower() in self._allowed_logins
 
     # ------------------------------------------------------------------ clients
 
@@ -427,13 +428,14 @@ expires in one hour. It is never written to disk or logged.</p>
             logger.info("bridge sign-in refused: uid %s is not on the allowlist", uid)
             with self._lock:
                 self._pending.pop(request_id, None)
-            return _secure(
-                HTMLResponse(
-                    "This Odoo user is not enabled for this connector yet. "
-                    "Ask your administrator.",
-                    status_code=403,
-                )
+            # Hand the refusal back to the client so it stops waiting.
+            target = construct_redirect_uri(
+                str(pending.params.redirect_uri),
+                error="access_denied",
+                error_description="This Odoo user is not enabled for this connector",
+                state=pending.params.state,
             )
+            return _secure(RedirectResponse(target, status_code=302))
         with self._lock:
             if self._pending.pop(request_id, None) is None:
                 return _secure(HTMLResponse("This sign-in link has expired.", status_code=400))

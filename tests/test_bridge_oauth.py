@@ -463,19 +463,26 @@ def test_allowlist_refuses_unlisted_login_after_key_verifies(tmp_path, odoo, now
     provider = _allowlisted(tmp_path, odoo, now, frozenset({"ann@example.com"}))
     client = TestClient(_app(provider), base_url=ISSUER)
     _, _, done = _full_flow(client, login="bob@example.com", key="bob-key")
-    assert done.status_code == 403
-    assert "not enabled" in done.text
-    assert "bob-key" not in done.text
-    assert "location" not in done.headers
+    assert done.status_code == 302
+    location = urlparse(done.headers["location"])
+    query = parse_qs(location.query)
+    assert f"{location.scheme}://{location.netloc}{location.path}" == REDIRECT
+    assert query["error"] == ["access_denied"]
+    assert query["state"] == ["st1"]
+    assert "code" not in query
+    assert "bob-key" not in done.headers["location"]
 
 
-def test_allowlist_wrong_key_gives_generic_failure(tmp_path, odoo, now):
+def test_allowlist_wrong_key_same_answer_listed_or_not(tmp_path, odoo, now):
+    odoo.users["bob@example.com"] = ("bob-key", 9)
     provider = _allowlisted(tmp_path, odoo, now, frozenset({"ann@example.com"}))
     client = TestClient(_app(provider), base_url=ISSUER)
-    _, _, done = _full_flow(client, login="bob@example.com", key="wrong")
-    assert done.status_code == 200
-    assert "Sign-in failed" in done.text
-    assert "not enabled" not in done.text
+    _, _, unlisted = _full_flow(client, login="bob@example.com", key="wrong")
+    _, _, listed = _full_flow(client, login="ann@example.com", key="wrong")
+    for done in (unlisted, listed):
+        assert done.status_code == 200
+        assert "Sign-in failed" in done.text
+        assert "location" not in done.headers
 
 
 def test_allowlist_unlisted_request_cannot_be_retried(tmp_path, odoo, now):
@@ -488,9 +495,17 @@ def test_allowlist_unlisted_request_cannot_be_retried(tmp_path, odoo, now):
     auth = _authorize(client, client_id, challenge)
     page = client.get(auth.headers["location"])
     fields = _signin_fields(page.text)
-    first = client.post("/signin", data={**fields, "login": "bob@example.com", "api_key": "bob-key"})
-    assert first.status_code == 403
-    again = client.post("/signin", data={**fields, "login": "ann@example.com", "api_key": KEY})
+    first = client.post(
+        "/signin",
+        data={**fields, "login": "bob@example.com", "api_key": "bob-key"},
+        follow_redirects=False,
+    )
+    assert "error=access_denied" in first.headers["location"]
+    again = client.post(
+        "/signin",
+        data={**fields, "login": "ann@example.com", "api_key": KEY},
+        follow_redirects=False,
+    )
     assert again.status_code == 400  # the pending sign-in was consumed
 
 
@@ -521,3 +536,9 @@ def test_allowlist_removal_cuts_off_existing_tokens(tmp_path, odoo, now):
 
 def test_allowlist_off_by_default(provider):
     assert provider.login_allowed("anyone@example.com")
+
+
+def test_allowlist_uses_verifier_lowercase_not_casefold(tmp_path, odoo, now):
+    provider = _allowlisted(tmp_path, odoo, now, frozenset({"strasse@example.com"}))
+    assert provider.login_allowed("STRASSE@example.com")
+    assert not provider.login_allowed("straße@example.com")

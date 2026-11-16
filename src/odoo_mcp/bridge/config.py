@@ -66,7 +66,7 @@ class BridgeConfig:
     #: Test only: also accept http://localhost redirects. Off by default.
     allow_localhost_redirects: bool = False
     extra_allowed_origins: tuple[str, ...] = ()
-    #: Odoo logins (casefolded) allowed to sign in. ``None``: any Odoo user.
+    #: Odoo logins (lowercased, as the verifier compares) allowed to sign in. ``None``: any Odoo user.
     allowed_logins: frozenset[str] | None = None
 
     @property
@@ -94,9 +94,11 @@ def _networks(raw: str | None) -> tuple[str, ...]:
 
 def _logins(raw: str | None) -> frozenset[str] | None:
     """Parse the sign-in allowlist; unset means any Odoo user may sign in."""
-    if raw is None or not raw.strip():
+    if raw is None:
         return None
-    items = frozenset(item.casefold() for item in _csv(raw))
+    # Present means on: an empty value (say, an unset template variable) must
+    # not quietly open the gate, so it refuses startup instead.
+    items = frozenset(item.lower() for item in _csv(raw))
     if not items:
         raise BridgeConfigError("ODOO_MCP_BRIDGE_ALLOWED_LOGINS is set but names no login")
     return items
