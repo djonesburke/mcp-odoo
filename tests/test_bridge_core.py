@@ -98,6 +98,8 @@ def test_seal_key_missing_or_wrong_length(tmp_path):
         load_seal_key(tmp_path / "nope")
     short = tmp_path / "short"
     short.write_bytes(b"x" * 16)
+    if os.name == "posix":
+        os.chmod(short, 0o600)  # isolate the length check from the mode check
     with pytest.raises(SealKeyError, match="32 bytes"):
         load_seal_key(short)
 
