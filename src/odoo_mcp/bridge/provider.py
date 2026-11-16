@@ -159,6 +159,7 @@ class BridgeOAuthProvider:
         allow_localhost_redirects: bool = False,
         client_ip_header: str | None = None,
         trusted_proxies: TrustedProxies | None = None,
+        allowed_logins: frozenset[str] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._key = seal_key
@@ -168,6 +169,9 @@ class BridgeOAuthProvider:
         self._allowed_hosts = tuple(h.lower() for h in allowed_redirect_hosts)
         self._allow_localhost = allow_localhost_redirects
         self._ip_header = client_ip_header.lower() if client_ip_header else None
+        self._allowed_logins = (
+            None if allowed_logins is None else frozenset(x.lower() for x in allowed_logins)
+        )
         self._clock = clock
         self._lock = threading.Lock()
         self._pending: OrderedDict[str, _Pending] = OrderedDict()
@@ -182,6 +186,11 @@ class BridgeOAuthProvider:
         self._clients: dict[str, OAuthClientInformationFull] = self._load_clients()
         if self._clients_path.exists():
             _restrict(self._clients_path)
+
+    def login_allowed(self, login: str) -> bool:
+        """True when the sign-in allowlist is off or names this login."""
+        # ``lower()``, not ``casefold()``: the same rule the Odoo verifier uses.
+        return self._allowed_logins is None or login.strip().lower() in self._allowed_logins
 
     # ------------------------------------------------------------------ clients
 
@@ -414,6 +423,19 @@ expires in one hour. It is never written to disk or logged.</p>
                 login=login,
                 error="Sign-in failed. Check your login and API key.",
             )
+        if not self.login_allowed(login):
+            # Told only after the key verified, so the list cannot be probed.
+            logger.info("bridge sign-in refused: uid %s is not on the allowlist", uid)
+            with self._lock:
+                self._pending.pop(request_id, None)
+            # Hand the refusal back to the client so it stops waiting.
+            target = construct_redirect_uri(
+                str(pending.params.redirect_uri),
+                error="access_denied",
+                error_description="This Odoo user is not enabled for this connector",
+                state=pending.params.state,
+            )
+            return _secure(RedirectResponse(target, status_code=302))
         with self._lock:
             if self._pending.pop(request_id, None) is None:
                 return _secure(HTMLResponse("This sign-in link has expired.", status_code=400))
@@ -510,6 +532,8 @@ expires in one hour. It is never written to disk or logged.</p>
         if not isinstance(uid, int) or not isinstance(payload.get("login"), str):
             return None
         if not isinstance(payload.get("key"), str):
+            return None
+        if not self.login_allowed(payload["login"]):  # removal takes effect at once
             return None
         jti = payload.get("jti")
         if not isinstance(jti, str) or not jti or self.is_revoked(jti):

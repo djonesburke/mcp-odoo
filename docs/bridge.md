@@ -57,6 +57,7 @@ from each request's own token and never from a long-lived session.
 | `ODOO_MCP_BRIDGE_CLIENT_IP_HEADER` | no | Header carrying the real client IP behind a proxy (for example `CF-Connecting-IP`); the last value is used. It is honoured **only** when the socket peer is loopback or listed in `ODOO_MCP_BRIDGE_TRUSTED_PROXIES`; otherwise the peer address is used, so a client cannot spoof it. |
 | `ODOO_MCP_BRIDGE_TRUSTED_PROXIES` | no | CSV of IPs/CIDRs allowed to set that header (default: loopback only). |
 | `ODOO_MCP_BRIDGE_ALLOWED_ORIGINS` | no | Extra CSV of allowed `Origin` values. |
+| `ODOO_MCP_BRIDGE_ALLOWED_LOGINS` | no | CSV of Odoo logins allowed to sign in (case-insensitive). Unset: any Odoo user with a valid API key. Checked after the key verifies (so the list cannot be probed) and again on every access and refresh token, so removing a login cuts that user off at once. Present but naming no login (including an empty value): startup refused. An unlisted user whose key verifies is sent back to the client with `error=access_denied`. Removing a login suspends access; it does not revoke: tokens issued earlier work again if the login is re-added, so rotate the seal key if a token may be compromised. |
 | `ODOO_TIMEOUT`, `ODOO_VERIFY_SSL` | no | As for `odoo-mcp`. |
 
 The process **exits non-zero with a message on stderr** if any of these is
