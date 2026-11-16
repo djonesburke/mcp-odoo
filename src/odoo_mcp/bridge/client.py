@@ -122,11 +122,12 @@ def verify_odoo_login(
 
 
 def token_digest(token: str) -> str:
+    """Opaque cache key for a token id."""
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 class UserClientCache:
-    """One client per token digest; TTL capped by the token's own expiry."""
+    """One client per token id; TTL capped by the token's own expiry."""
 
     def __init__(self, max_entries: int = 128, clock: Callable[[], float] = time.time):
         self._max = max(1, max_entries)

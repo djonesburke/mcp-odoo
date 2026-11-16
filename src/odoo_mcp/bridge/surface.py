@@ -139,7 +139,8 @@ class BridgeAppContext(AppContext):
     def __init__(self, runtime: BridgeRuntime) -> None:
         self._runtime = runtime
         super().__init__(odoo_factory=self._no_shared_client)
-        self._default_instance_name = runtime.config.instance
+        # Field-ACL rules are looked up by this key, not by the public label.
+        self._default_instance_name = runtime.config.policy_instance
 
     @staticmethod
     def _no_shared_client() -> Any:
@@ -150,10 +151,10 @@ class BridgeAppContext(AppContext):
         return self._runtime.client_for(current_user())
 
     def get_client(self, instance: Optional[str] = None) -> tuple[str, Any]:  # type: ignore[override]
-        label = self._runtime.config.instance
-        if instance and instance != label:
-            raise ValueError(f"This bridge serves one instance only ({label!r}).")
-        return label, self.odoo
+        config = self._runtime.config
+        if instance and instance not in (config.instance, config.policy_instance):
+            raise ValueError(f"This bridge serves one instance only ({config.instance!r}).")
+        return config.policy_instance, self.odoo
 
     @property
     def schema_cache(self) -> Any:  # type: ignore[override]
@@ -178,25 +179,28 @@ def bridge_lifespan(runtime: BridgeRuntime) -> Callable[[Any], Any]:
 def install_seams(runtime: BridgeRuntime) -> Callable[[], None]:
     """Point the ``_srv()`` seams at the per-user runtime; returns an undo."""
     label = runtime.config.instance
+    policy_key = runtime.config.policy_instance
+
+    def check(instance: Optional[str]) -> None:
+        if instance and instance not in (label, policy_key):
+            raise ValueError(f"This bridge serves one instance only ({label!r}).")
 
     def get_odoo_client() -> Any:
         return runtime.client_for(current_user())
 
     def get_odoo_client_for(instance: str | None = None) -> tuple[str, Any]:
-        if instance and instance != label:
-            raise ValueError(f"This bridge serves one instance only ({label!r}).")
-        return label, get_odoo_client()
+        check(instance)
+        return policy_key, get_odoo_client()
 
     def resolve_default_instance_name() -> str:
-        return label
+        return policy_key
 
     def resolve_instance_name(instance: Optional[str]) -> str:
-        if instance and instance != label:
-            raise ValueError(f"This bridge serves one instance only ({label!r}).")
-        return label
+        check(instance)
+        return policy_key
 
     def load_instances_config() -> tuple[str, dict[str, dict[str, Any]]]:
-        return label, {label: {"url": runtime.config.odoo_url, "db": runtime.config.odoo_db}}
+        return policy_key, {policy_key: {}}
 
     patches = {
         "get_odoo_client": get_odoo_client,
@@ -249,6 +253,34 @@ def _field_names(kwargs: dict[str, Any]) -> list[str]:
     return names[:50]
 
 
+_PROFILE_HIDDEN = (
+    "url",
+    "hostname",
+    "database",
+    "timeout",
+    "verify_ssl",
+    "json2_database_header",
+)
+
+
+def _redact_profile(result: Any) -> Any:
+    """Never hand the backend address, DB name or TLS/timeout settings to a user."""
+    if not isinstance(result, dict) or not isinstance(result.get("profile"), dict):
+        return result
+    profile = dict(result["profile"])
+    for key in _PROFILE_HIDDEN:
+        if key in profile:
+            profile[key] = "<redacted>"
+    for key in ("server_version", "user_context"):
+        value = profile.get(key)
+        if isinstance(value, dict) and "error" in value:
+            profile[key] = {"error": "unavailable"}
+    return {**result, "profile": profile}
+
+
+_RESULT_FILTERS: dict[str, Callable[[Any], Any]] = {"get_odoo_profile": _redact_profile}
+
+
 def _error(message: str, **extra: Any) -> dict[str, Any]:
     return {"success": False, "error": message, **extra}
 
@@ -292,6 +324,9 @@ def wrap_tool(tool: Any, runtime: BridgeRuntime) -> None:
                     if isinstance(asked, int) and not isinstance(asked, bool) and asked > cap:
                         kwargs[param] = cap
                 result = original(*args, **kwargs)
+                result_filter = _RESULT_FILTERS.get(name)
+                if result_filter is not None:
+                    result = result_filter(result)
                 if isinstance(result, dict) and result.get("success") is False:
                     outcome = "error"
         except BridgeIdentityError as exc:

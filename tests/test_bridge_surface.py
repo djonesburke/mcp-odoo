@@ -11,6 +11,7 @@ from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from starlette.testclient import TestClient
 
 from odoo_mcp import server as srv
+from odoo_mcp.field_policy import reset_field_policy
 from odoo_mcp.bridge import surface
 from odoo_mcp.bridge.app import build_bridge
 from odoo_mcp.bridge.client import UserClientCache
@@ -38,8 +39,29 @@ SECRET_A = "key-for-user-a-SECRET"
 SECRET_B = "key-for-user-b-SECRET"
 
 
+POLICY = {
+    "field_acl": {
+        "default": {
+            "res.partner": {"deny": ["credit_limit"]},
+            "ir.attachment": {"deny": ["datas"]},
+        }
+    }
+}
+
+
 @pytest.fixture
-def restore_global_mcp():
+def field_policy(monkeypatch, tmp_path):
+    """An explicit policy file keyed under "default", as deployments ship it."""
+    path = tmp_path / "field-policy.json"
+    path.write_text(json.dumps(POLICY), encoding="utf-8")
+    monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(path))
+    reset_field_policy()
+    yield path
+    reset_field_policy()
+
+
+@pytest.fixture
+def restore_global_mcp(field_policy):
     """The bridge mutates the shared ``mcp`` singleton; put it back."""
     tm, rm, pm = mcp._tool_manager, mcp._resource_manager, mcp._prompt_manager
     tools = dict(tm._tools)
@@ -87,15 +109,34 @@ class FakeOdoo:
     def get_model_fields(self, model):
         return {
             "name": {"type": "char", "string": "Name"},
+            "credit_limit": {"type": "monetary", "string": "Credit"},
             "id": {"type": "integer", "string": "ID"},
         }
 
     def search_read(self, **kwargs):
         self.calls.append(("search_read", kwargs))
-        return [{"id": i, "name": f"{self.login}-{i}"} for i in range(1, 4)]
+        return [
+            {"id": i, "name": f"{self.login}-{i}", "credit_limit": 5000 + i}
+            for i in range(1, 4)
+        ]
+
+    def read_records(self, model, ids, fields=None):
+        return [{"id": ids[0], "name": self.login, "credit_limit": 123}]
 
     def execute_method(self, model, method, *args, **kwargs):
         self.calls.append((method, kwargs))
+        if model == "ir.attachment" and method == "read":
+            return [
+                {
+                    "id": 5,
+                    "name": "limit.bin",
+                    "type": "binary",
+                    "file_size": 3,
+                    "res_model": "res.partner",
+                    "res_field": "credit_limit",
+                    "res_id": 1,
+                }
+            ]
         return []
 
 
@@ -120,6 +161,7 @@ def _config(tmp_path, **kw):
 
 def _token(uid, login, key, exp=None, raw=None):
     return BridgeAccessToken(
+        jti=raw or f"jti-{uid}",
         token=raw or f"raw-token-{uid}",
         client_id="c",
         scopes=["odoo.read"],
@@ -283,7 +325,7 @@ def test_two_users_never_share_a_client(runtime, restore_global_mcp):
         auth_context_var.reset(tok_a)
     finally:
         undo()
-    assert name_a == name_b == "staging"
+    assert name_a == name_b == "default"  # the policy key, not the label
     assert client_a is not client_b
     assert (client_a.login, client_a.key) == ("a@example.com", SECRET_A)
     assert (client_b.login, client_b.key) == ("b@example.com", SECRET_B)
@@ -296,7 +338,7 @@ def test_one_instance_only(runtime):
     ctx = BridgeAppContext(runtime)
     tok = _as(_token(1, "a@example.com", SECRET_A))
     try:
-        assert ctx.get_client("staging")[0] == "staging"
+        assert ctx.get_client("staging")[0] == "default"
         with pytest.raises(ValueError, match="one instance only"):
             ctx.get_client("production")
     finally:

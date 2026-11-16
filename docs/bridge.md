@@ -40,6 +40,7 @@ from each request's own token and never from a long-lived session.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
+| `ODOO_MCP_FIELD_POLICY_FILE` | yes | Path to the field-ACL policy file (see [field-acl.md](field-acl.md)). The bridge refuses to start without it, if the file is missing or malformed, or if it has no rules under the policy key. The `./odoo_mcp_policy.json` fallback is never used. No opt-out. |
 | `ODOO_URL` | yes | Base URL of the one Odoo instance (JSON-2 API: `/json/2/<model>/<method>`). |
 | `ODOO_DB` | yes | Database name, sent as `X-Odoo-Database`. |
 | `ODOO_MCP_BRIDGE_INSTANCE` | yes | `staging` or `production`. Reported by `health_check` and written to every audit line. Also the instance name used by field-ACL policy files. |
@@ -47,10 +48,12 @@ from each request's own token and never from a long-lived session.
 | `ODOO_MCP_BRIDGE_SEAL_KEY_FILE` | yes | Path to the 32-byte seal key. |
 | `ODOO_MCP_BRIDGE_STATE_DIR` | yes | Directory for `clients.json` (registered connectors, non-secret). |
 | `ODOO_MCP_BRIDGE_AUDIT_LOG` | yes | JSONL audit file (must be writable at start). |
+| `ODOO_MCP_BRIDGE_POLICY_INSTANCE` | no | Key the policy file uses for this instance's rules (default `default`). `health_check` and audit lines still report the `staging`/`production` label. |
 | `ODOO_MCP_BRIDGE_HOST` / `_PORT` | no | Bind address (default `127.0.0.1:8765`). |
 | `ODOO_MCP_BRIDGE_CALLS_PER_MINUTE` | no | Per-user throttle (default 60). |
 | `ODOO_MCP_BRIDGE_MAX_LIMIT` | no | Largest record limit a read may request (default 200). |
-| `ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS` | no | CSV of hosts allowed as OAuth redirect URIs. Empty means any `https` host. Set it to your client's host. |
+| `ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS` | no | CSV of exact hosts allowed as OAuth redirect URIs, `https` only. Default `claude.ai,claude.com`. |
+| `ODOO_MCP_BRIDGE_ALLOW_LOCALHOST_REDIRECTS` | no | Test only (default off): also accept `http://localhost` redirects. |
 | `ODOO_MCP_BRIDGE_CLIENT_IP_HEADER` | no | Header carrying the real client IP behind a proxy (for example `CF-Connecting-IP`); the last value is used. Without it the socket peer is used, which is the proxy itself. |
 | `ODOO_MCP_BRIDGE_ALLOWED_ORIGINS` | no | Extra CSV of allowed `Origin` values. |
 | `ODOO_TIMEOUT`, `ODOO_VERIFY_SSL` | no | As for `odoo-mcp`. |
@@ -122,8 +125,10 @@ after registration.
 
 Limits: every read tool's `limit`, `sample_limit` and `module_limit` is capped
 at `ODOO_MCP_BRIDGE_MAX_LIMIT`; each user is throttled to
-`ODOO_MCP_BRIDGE_CALLS_PER_MINUTE`; the field-ACL policy files of `odoo-mcp`
-still apply, keyed by the instance label.
+`ODOO_MCP_BRIDGE_CALLS_PER_MINUTE`; the field-ACL policy applies as in `odoo-mcp`,
+keyed by `ODOO_MCP_BRIDGE_POLICY_INSTANCE` (not the instance label). `get_odoo_profile`
+returns `<redacted>` for the backend URL, host, database name, TLS-verify setting
+and timeout.
 
 The Odoo client used by the bridge refuses any RPC method outside
 `READ_ONLY_METHODS` plus `read_group` and `formatted_read_group` (the two
@@ -154,13 +159,22 @@ If the audit line cannot be written the result is withheld (no audit, no data).
 - **Seal key compromise exposes the API keys inside every live token** and lets
   an attacker mint tokens. Protect the file (0600, own account) and rotate on
   suspicion. Rotation revokes everyone.
-- **Revocation is a bounded in-memory deny set** (10,000 digests): it is lost on
-  restart and revoking an access token does not revoke its refresh token. Revoke
-  the Odoo API key itself to end a user's access for good.
-- **Open client registration.** Anyone who can reach `/register` can register a
-  client with an `https` redirect URI. The sign-in page shows the connector name
-  and redirect host. Set `ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS` to your client's
-  host to close this.
+- **Revocation is a bounded in-memory deny set** of token ids (`jti`, 10,000
+  entries): it is lost on restart and revoking an access token does not revoke its
+  refresh token. An unexpired entry is never evicted; when the set is full of live
+  entries a refresh is refused. Token encoding is strict (a padded or re-spelled
+  copy of a token is invalid). Refresh rotation is atomic: of two concurrent
+  refreshes with one token exactly one succeeds. Revoke the Odoo API key itself to
+  end a user's access for good.
+- **Client registration is open but constrained.** Anyone who can reach
+  `/register` can register a *public* client, but only with an `https` redirect on
+  an allowed host (default `claude.ai`, `claude.com`, exact match). The list is
+  re-checked when `clients.json` loads (non-conforming clients are dropped with a
+  log line) and again at `/authorize`. `/register`, `/authorize` and `/token` are
+  throttled per client IP; when the client table (1,000) or the pending sign-in
+  table (500) is full, new entries are refused rather than evicting old ones.
+  Registration always stores and returns `token_endpoint_auth_method: none` and
+  no secret (the SDK would otherwise mint one); metadata advertises only `none`.
 - The auth code is held in memory with the user's key for up to five minutes.
 - Sign-in attempts are limited to 5 a minute per client IP; configure
   `ODOO_MCP_BRIDGE_CLIENT_IP_HEADER` behind a proxy or the limit is shared by all

@@ -32,6 +32,7 @@ from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
+    AuthorizeError,
     RefreshToken,
     RegistrationError,
     TokenError,
@@ -44,7 +45,8 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 from ..rate_limit import SlidingWindowRateTracker
-from .client import BridgeAuthError, token_digest
+from .client import BridgeAuthError
+from .config import DEFAULT_REDIRECT_HOSTS
 from .seal import seal, unseal
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ MAX_PENDING = 500
 MAX_CODES = 500
 MAX_DENIED = 10_000
 MAX_CLIENTS = 1000
+JTI_BYTES = 16
 LOGIN_ATTEMPTS_PER_MINUTE = 5
 DEFAULT_SCOPE = "odoo.read"
 SIGNIN_PATH = "/signin"
@@ -72,12 +75,14 @@ class BridgeAuthorizationCode(AuthorizationCode):
 
 
 class BridgeRefreshToken(RefreshToken):
+    jti: str
     uid: int
     login: str
     odoo_key: str = Field(repr=False, exclude=True)
 
 
 class BridgeAccessToken(AccessToken):
+    jti: str
     uid: int
     login: str
     odoo_key: str = Field(repr=False, exclude=True)
@@ -91,6 +96,19 @@ class _Pending:
         self.params = params
         self.csrf = secrets.token_urlsafe(32)
         self.expires_at = expires_at
+
+
+def _new_jti() -> str:
+    return secrets.token_urlsafe(JTI_BYTES)
+
+
+def client_ip(request: Request, header: str | None) -> str:
+    """Client address: the configured proxy header (last value) or the peer."""
+    if header:
+        value = request.headers.get(header, "")
+        if value:
+            return value.split(",")[-1].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
 
 
 def _secure(response: Response) -> Response:
@@ -115,7 +133,8 @@ class BridgeOAuthProvider:
         public_url: str,
         state_dir: str | os.PathLike[str],
         verifier: Verifier,
-        allowed_redirect_hosts: tuple[str, ...] = (),
+        allowed_redirect_hosts: tuple[str, ...] = DEFAULT_REDIRECT_HOSTS,
+        allow_localhost_redirects: bool = False,
         client_ip_header: str | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -124,6 +143,7 @@ class BridgeOAuthProvider:
         self.public_url = public_url.rstrip("/")
         self._verifier = verifier
         self._allowed_hosts = tuple(h.lower() for h in allowed_redirect_hosts)
+        self._allow_localhost = allow_localhost_redirects
         self._ip_header = client_ip_header.lower() if client_ip_header else None
         self._clock = clock
         self._lock = threading.Lock()
@@ -134,7 +154,7 @@ class BridgeOAuthProvider:
             window_seconds=60, max_calls=LOGIN_ATTEMPTS_PER_MINUTE
         )
         self._state_dir = Path(state_dir)
-        self._state_dir.mkdir(parents=True, exist_ok=True)
+        self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._clients_path = self._state_dir / "clients.json"
         self._clients: dict[str, OAuthClientInformationFull] = self._load_clients()
 
@@ -154,6 +174,13 @@ class BridgeOAuthProvider:
                 info = OAuthClientInformationFull.model_validate(entry)
             except ValueError:
                 continue
+            uris = [str(u) for u in (info.redirect_uris or [])]
+            if not uris or not all(self._redirect_allowed(u) for u in uris):
+                logger.warning(
+                    "bridge dropped registered client %s: redirect URI is not allowed",
+                    info.client_id,
+                )
+                continue
             clients[info.client_id] = info
         return clients
 
@@ -172,12 +199,14 @@ class BridgeOAuthProvider:
                 os.unlink(tmp)
 
     def _redirect_allowed(self, uri: str) -> bool:
+        """Exact-host https allowlist; http://localhost only under a test flag."""
         parsed = urlparse(uri)
         host = (parsed.hostname or "").lower()
         if parsed.scheme == "https":
-            return not self._allowed_hosts or host in self._allowed_hosts
-        # http is only for local tests and native loopback redirects.
-        return parsed.scheme == "http" and host in {"localhost", "127.0.0.1", "::1"}
+            return host in self._allowed_hosts
+        if parsed.scheme == "http" and self._allow_localhost:
+            return host in {"localhost", "127.0.0.1", "::1"}
+        return False
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self._clients.get(client_id)
@@ -187,7 +216,7 @@ class BridgeOAuthProvider:
         if not uris or not all(self._redirect_allowed(u) for u in uris):
             raise RegistrationError(
                 "invalid_redirect_uri",
-                "redirect URIs must be https (or http://localhost)",
+                "redirect URIs must be https on an allowed host",
             )
         # Public PKCE client: never persist (or honour) a secret.
         stored = client_info.model_copy(
@@ -199,7 +228,9 @@ class BridgeOAuthProvider:
         )
         with self._lock:
             if len(self._clients) >= MAX_CLIENTS:
-                del self._clients[next(iter(self._clients))]
+                raise RegistrationError(
+                    "invalid_client_metadata", "client registration is full; try later"
+                )
             self._clients[stored.client_id] = stored
             self._persist_clients_locked()
 
@@ -210,29 +241,26 @@ class BridgeOAuthProvider:
             del self._pending[key]
         for code in [k for k, v in self._codes.items() if v.expires_at <= now]:
             del self._codes[code]
-        while len(self._pending) > MAX_PENDING:
-            self._pending.popitem(last=False)
-        while len(self._codes) > MAX_CODES:
-            self._codes.popitem(last=False)
 
     async def authorize(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
         now = self._clock()
         request_id = secrets.token_urlsafe(24)
+        if not self._redirect_allowed(str(params.redirect_uri)):
+            raise AuthorizeError("invalid_request", "redirect URI is not allowed")
         with self._lock:
             self._prune_locked(now)
+            if len(self._pending) >= MAX_PENDING:
+                # never evict someone mid sign-in; refuse the newcomer
+                raise AuthorizeError("temporarily_unavailable", "too many sign-ins in progress")
             self._pending[request_id] = _Pending(
                 client.client_id, params, now + PENDING_TTL_SECONDS
             )
         return f"{self.public_url}{SIGNIN_PATH}?req={request_id}"
 
     def _client_ip(self, request: Request) -> str:
-        if self._ip_header:
-            value = request.headers.get(self._ip_header, "")
-            if value:
-                return value.split(",")[-1].strip() or "unknown"
-        return request.client.host if request.client else "unknown"
+        return client_ip(request, self._ip_header)
 
     def _form(
         self, request_id: str, pending: _Pending, *, login: str = "", error: str = ""
@@ -306,6 +334,8 @@ expires in one hour. It is never written to disk or logged.</p>
         with self._lock:
             if self._pending.pop(request_id, None) is None:
                 return _secure(HTMLResponse("This sign-in link has expired.", status_code=400))
+            if len(self._codes) >= MAX_CODES:
+                return _secure(HTMLResponse("Busy. Try again shortly.", status_code=503))
             code = secrets.token_urlsafe(32)
             params = pending.params
             self._codes[code] = BridgeAuthorizationCode(
@@ -356,8 +386,14 @@ expires in one hour. It is never written to disk or logged.</p>
             "iat": now,
             "cid": client_id,  # binds the token to the connector that obtained it
         }
-        access = seal(self._key, {**base, "typ": "access", "exp": now + ACCESS_TTL_SECONDS})
-        refresh = seal(self._key, {**base, "typ": "refresh", "exp": now + REFRESH_TTL_SECONDS})
+        access = seal(
+            self._key,
+            {**base, "typ": "access", "exp": now + ACCESS_TTL_SECONDS, "jti": _new_jti()},
+        )
+        refresh = seal(
+            self._key,
+            {**base, "typ": "refresh", "exp": now + REFRESH_TTL_SECONDS, "jti": _new_jti()},
+        )
         return OAuthToken(
             access_token=access,
             token_type="Bearer",
@@ -390,7 +426,8 @@ expires in one hour. It is never written to disk or logged.</p>
             return None
         if not isinstance(payload.get("key"), str):
             return None
-        if self.is_revoked(token):
+        jti = payload.get("jti")
+        if not isinstance(jti, str) or not jti or self.is_revoked(jti):
             return None
         return payload
 
@@ -399,6 +436,7 @@ expires in one hour. It is never written to disk or logged.</p>
         if payload is None:
             return None
         return BridgeAccessToken(
+            jti=payload["jti"],
             token=token,
             client_id=str(payload.get("cid") or "odoo-mcp-bridge"),
             scopes=[DEFAULT_SCOPE],
@@ -417,6 +455,7 @@ expires in one hour. It is never written to disk or logged.</p>
         if payload is None or payload.get("cid") != client.client_id:
             return None
         return BridgeRefreshToken(
+            jti=payload["jti"],
             token=refresh_token,
             client_id=client.client_id,
             scopes=[DEFAULT_SCOPE],
@@ -433,15 +472,22 @@ expires in one hour. It is never written to disk or logged.</p>
         refresh_token: BridgeRefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
+        # Claim the token first, atomically: of two concurrent refreshes with
+        # one token exactly one gets past this line.
+        claimed = self._claim(refresh_token.jti, refresh_token.expires_at)
+        if claimed is None:
+            raise TokenError("invalid_grant", "refresh token is not valid")
+        if claimed is False:
+            raise TokenError("invalid_request", "revocation list is full; try again later")
         try:
             uid = await asyncio.to_thread(
                 self._verifier, refresh_token.login, refresh_token.odoo_key
             )
+            if uid != refresh_token.uid:
+                raise BridgeAuthError("invalid credentials")
         except BridgeAuthError as exc:
+            self._release(refresh_token.jti)  # not used up: the key was refused
             raise TokenError("invalid_grant", "credentials are no longer valid") from exc
-        if uid != refresh_token.uid:
-            raise TokenError("invalid_grant", "credentials are no longer valid")
-        self._deny(refresh_token.token, refresh_token.expires_at)  # rotate
         return self._issue(
             client.client_id,
             uid,
@@ -452,24 +498,43 @@ expires in one hour. It is never written to disk or logged.</p>
 
     # --------------------------------------------------------------- revocation
 
-    def _deny(self, token: str, expires_at: int | float | None) -> None:
-        digest = token_digest(token)
+    def _claim(self, jti: str, expires_at: int | float | None) -> bool | None:
+        """Add ``jti`` to the deny set. ``None`` if already there, ``False`` if full.
+
+        An unexpired denial is never evicted; when the set is full of live
+        denials the caller must refuse rather than forget one.
+        """
         now = self._clock()
         with self._lock:
-            self._denied[digest] = float(expires_at or now + REFRESH_TTL_SECONDS)
-            self._denied.move_to_end(digest)
-            if len(self._denied) > MAX_DENIED:
+            if jti in self._denied:
+                return None
+            if len(self._denied) >= MAX_DENIED:
                 for stale in [d for d, exp in self._denied.items() if exp <= now]:
                     del self._denied[stale]
-            while len(self._denied) > MAX_DENIED:
-                self._denied.popitem(last=False)
+                if len(self._denied) >= MAX_DENIED:
+                    return False
+            self._denied[jti] = float(expires_at or now + REFRESH_TTL_SECONDS)
+            return True
 
-    def is_revoked(self, token: str) -> bool:
+    def _release(self, jti: str) -> None:
         with self._lock:
-            return token_digest(token) in self._denied
+            self._denied.pop(jti, None)
+
+    def is_revoked(self, token_or_jti: str) -> bool:
+        """True for a denied jti, or a sealed token whose jti is denied."""
+        jti = token_or_jti
+        payload = unseal(self._key, token_or_jti)
+        if payload is not None and isinstance(payload.get("jti"), str):
+            jti = payload["jti"]
+        with self._lock:
+            return jti in self._denied
 
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        self._deny(token.token, token.expires_at)
+        jti = getattr(token, "jti", None)
+        if not isinstance(jti, str):
+            return
+        if self._claim(jti, token.expires_at) is False:
+            raise RuntimeError("revocation list is full; the token was not revoked")
 
     async def exchange_identity_assertion(self, client: Any, params: Any) -> OAuthToken:
         raise TokenError("unsupported_grant_type", "not supported")

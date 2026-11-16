@@ -54,8 +54,9 @@ class AuditLog:
         self._lock = threading.Lock()
 
     def check_writable(self) -> None:
-        with open(self.path, "a", encoding="utf-8"):
-            pass
+        """Create the file (0600 on POSIX) if needed and prove it is appendable."""
+        fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.close(fd)
 
     def record(
         self,
@@ -123,9 +124,9 @@ class BridgeRuntime:
         return factory
 
     def client_for(self, token: BridgeAccessToken) -> Any:
-        """One client per token digest, expiring with the token."""
+        """One client per token id (jti), expiring with the token."""
         return self.clients.get_or_build(
-            token.token,
+            token.jti,
             token.expires_at,
             lambda: self.client_factory(token.login, token.odoo_key),
         )
@@ -153,4 +154,7 @@ def make_runtime(config: BridgeConfig) -> BridgeRuntime:
 
 
 def ensure_state_dir(path: str) -> None:
+    """Create the state directory owner-only (POSIX) and tighten an existing one."""
     os.makedirs(path, mode=0o700, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(path, 0o700)

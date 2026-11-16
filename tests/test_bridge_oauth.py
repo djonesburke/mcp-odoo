@@ -12,12 +12,13 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from mcp.server.auth.provider import ProviderTokenVerifier
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
-from mcp.server.auth.routes import create_auth_routes
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
 from starlette.testclient import TestClient
 
 from odoo_mcp.bridge.client import BridgeAuthError
+from odoo_mcp.bridge.oauth_routes import IpThrottleMiddleware, build_oauth_routes
 from odoo_mcp.bridge.provider import (
     ACCESS_TTL_SECONDS,
     BridgeAccessToken,
@@ -64,18 +65,21 @@ def provider(tmp_path, odoo, now):
         public_url=ISSUER,
         state_dir=tmp_path / "state",
         verifier=odoo,
+        allowed_redirect_hosts=("claude.example.com",),
+        allow_localhost_redirects=True,
         clock=lambda: now[0],
     )
 
 
-def _app(provider):
-    routes = create_auth_routes(
+def _app(provider, **throttle):
+    routes = build_oauth_routes(
         provider,
-        issuer_url=AnyHttpUrl(ISSUER),
-        client_registration_options=ClientRegistrationOptions(enabled=True),
-        revocation_options=RevocationOptions(enabled=True),
+        AnyHttpUrl(ISSUER),
+        ClientRegistrationOptions(enabled=True),
+        RevocationOptions(enabled=True),
     )
-    return Starlette(routes=[*routes, *provider.routes()])
+    middleware = [Middleware(IpThrottleMiddleware, **throttle)] if throttle else []
+    return Starlette(routes=[*routes, *provider.routes()], middleware=middleware)
 
 
 def _pkce():
@@ -284,20 +288,14 @@ def test_registration_is_https_only_public_and_persisted(provider, tmp_path, odo
         public_url=ISSUER,
         state_dir=tmp_path / "state",
         verifier=odoo,
+        allowed_redirect_hosts=("claude.example.com",),
+        allow_localhost_redirects=True,
         clock=lambda: now[0],
     )
     assert _run(restarted.get_client(reg.json()["client_id"])) is not None
 
 
-def test_allowed_redirect_hosts_restrict_registration(tmp_path, odoo):
-    provider = BridgeOAuthProvider(
-        seal_key=SEAL,
-        instance="staging",
-        public_url=ISSUER,
-        state_dir=tmp_path / "s",
-        verifier=odoo,
-        allowed_redirect_hosts=("claude.example.com",),
-    )
+def test_allowed_redirect_hosts_restrict_registration(provider):
     client = TestClient(_app(provider), base_url=ISSUER)
     assert _register(client).status_code == 201
     assert _register(client, redirect="https://other.example.com/cb").status_code == 400
@@ -373,6 +371,7 @@ def test_refresh_token_is_bound_to_its_client(provider):
 def test_load_access_token_rejects_bad_tokens(provider, now):
     base = {
         "v": 1,
+        "jti": "j1",
         "typ": "access",
         "uid": 1,
         "login": "a@example.com",
@@ -419,9 +418,9 @@ def test_revocation_denies_the_token(provider):
 
 def test_revocation_set_is_bounded(provider, monkeypatch):
     monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_DENIED", 5)
-    for i in range(20):
-        provider._deny(f"tok{i}", 1_800_000_000 + 100)
-    assert len(provider._denied) <= 5
+    results = [provider._claim(f"tok{i}", 1_800_000_000 + 100) for i in range(8)]
+    assert results == [True] * 5 + [False] * 3  # full of live denials: refuse, never evict
+    assert len(provider._denied) == 5 and "tok0" in provider._denied
 
 
 def test_no_key_in_provider_repr_or_client_file(provider, tmp_path):

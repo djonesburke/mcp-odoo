@@ -87,6 +87,10 @@ def unseal(key: bytes, token: str) -> dict[str, Any] | None:
         raw = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
     except (ValueError, TypeError):
         return None
+    # Strict encoding: exactly one string maps to each token, so a padded or
+    # otherwise re-spelled copy can never dodge a deny-list keyed on the text.
+    if base64.urlsafe_b64encode(raw).decode().rstrip("=") != body:
+        return None
     if len(raw) <= _NONCE_BYTES + 16:
         return None
     try:

@@ -29,6 +29,8 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_CALLS_PER_MINUTE = 60
 DEFAULT_MAX_LIMIT = 200
 DEFAULT_PORT = 8765
+DEFAULT_POLICY_INSTANCE = "default"
+DEFAULT_REDIRECT_HOSTS = ("claude.ai", "claude.com")
 
 
 class BridgeConfigError(ValueError):
@@ -52,7 +54,12 @@ class BridgeConfig:
     timeout: int = 30
     verify_ssl: bool = True
     client_ip_header: str | None = None
-    allowed_redirect_hosts: tuple[str, ...] = ()
+    #: Key the field-ACL policy file uses for this instance's rules.
+    policy_instance: str = DEFAULT_POLICY_INSTANCE
+    #: Exact hosts allowed as https OAuth redirect targets.
+    allowed_redirect_hosts: tuple[str, ...] = DEFAULT_REDIRECT_HOSTS
+    #: Test only: also accept http://localhost redirects. Off by default.
+    allow_localhost_redirects: bool = False
     extra_allowed_origins: tuple[str, ...] = ()
 
     @property
@@ -144,6 +151,17 @@ def load_config(env: Mapping[str, str] | None = None) -> BridgeConfig:
         timeout=_int(source, "ODOO_TIMEOUT", 30),
         verify_ssl=verify_raw not in {"0", "false", "no", "off"},
         client_ip_header=(source.get("ODOO_MCP_BRIDGE_CLIENT_IP_HEADER", "").strip() or None),
-        allowed_redirect_hosts=_csv(source.get("ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS")),
+        policy_instance=(
+            source.get("ODOO_MCP_BRIDGE_POLICY_INSTANCE", "").strip()
+            or DEFAULT_POLICY_INSTANCE
+        ),
+        allowed_redirect_hosts=(
+            tuple(h.lower() for h in _csv(source.get("ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS")))
+            or DEFAULT_REDIRECT_HOSTS
+        ),
+        allow_localhost_redirects=(
+            source.get("ODOO_MCP_BRIDGE_ALLOW_LOCALHOST_REDIRECTS", "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        ),
         extra_allowed_origins=_csv(source.get("ODOO_MCP_BRIDGE_ALLOWED_ORIGINS")),
     )
