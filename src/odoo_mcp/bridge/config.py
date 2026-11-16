@@ -31,6 +31,9 @@ DEFAULT_MAX_LIMIT = 200
 DEFAULT_PORT = 8765
 DEFAULT_POLICY_INSTANCE = "default"
 DEFAULT_REDIRECT_HOSTS = ("claude.ai", "claude.com")
+DEFAULT_TRUSTED_PROXIES = ("127.0.0.0/8", "::1/128")
+#: The one MCP SDK version the bridge's internals were verified against.
+TESTED_MCP_VERSION = "2.0.0"
 
 
 class BridgeConfigError(ValueError):
@@ -58,6 +61,8 @@ class BridgeConfig:
     policy_instance: str = DEFAULT_POLICY_INSTANCE
     #: Exact hosts allowed as https OAuth redirect targets.
     allowed_redirect_hosts: tuple[str, ...] = DEFAULT_REDIRECT_HOSTS
+    #: Peers (IPs/CIDRs) whose client-IP header is believed. Default: loopback.
+    trusted_proxies: tuple[str, ...] = DEFAULT_TRUSTED_PROXIES
     #: Test only: also accept http://localhost redirects. Off by default.
     allow_localhost_redirects: bool = False
     extra_allowed_origins: tuple[str, ...] = ()
@@ -69,6 +74,38 @@ class BridgeConfig:
 
 def _csv(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in (value or "").split(",") if item.strip())
+
+
+def _networks(raw: str | None) -> tuple[str, ...]:
+    import ipaddress
+
+    items = _csv(raw)
+    for item in items:
+        try:
+            ipaddress.ip_network(item, strict=False)
+        except ValueError as exc:
+            raise BridgeConfigError(
+                "ODOO_MCP_BRIDGE_TRUSTED_PROXIES must be a list of IPs or CIDRs"
+            ) from exc
+    return items or DEFAULT_TRUSTED_PROXIES
+
+
+def check_sdk_version(installed: str | None = None) -> None:
+    """Refuse to run on an MCP SDK other than the one the bridge was verified on."""
+    if installed is None:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            installed = version("mcp")
+        except PackageNotFoundError:
+            installed = "not installed"
+    if installed != TESTED_MCP_VERSION:
+        raise BridgeConfigError(
+            f"mcp {installed} is installed but the bridge was verified against "
+            f"mcp {TESTED_MCP_VERSION}; install the pinned version "
+            "(pip install 'odoo-mcp[bridge]') or re-verify the SDK internals "
+            "listed in docs/bridge.md and update TESTED_MCP_VERSION"
+        )
 
 
 def _int(env: Mapping[str, str], name: str, default: int, minimum: int = 1) -> int:
@@ -159,6 +196,7 @@ def load_config(env: Mapping[str, str] | None = None) -> BridgeConfig:
             tuple(h.lower() for h in _csv(source.get("ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS")))
             or DEFAULT_REDIRECT_HOSTS
         ),
+        trusted_proxies=_networks(source.get("ODOO_MCP_BRIDGE_TRUSTED_PROXIES")),
         allow_localhost_redirects=(
             source.get("ODOO_MCP_BRIDGE_ALLOW_LOCALHOST_REDIRECTS", "").strip().lower()
             in {"1", "true", "yes", "on"}

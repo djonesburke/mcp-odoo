@@ -279,7 +279,7 @@ def test_registration_is_https_only_public_and_persisted(provider, tmp_path, odo
     assert reg.status_code == 201
     persisted = (tmp_path / "state" / "clients.json").read_text()
     assert "client_secret" not in persisted.replace('"client_secret_', "")
-    stored = json.loads(persisted)
+    stored = json.loads(persisted)["clients"]
     assert all(c.get("token_endpoint_auth_method") == "none" for c in stored)
     # a restart keeps the connectors registered
     restarted = BridgeOAuthProvider(
@@ -418,7 +418,7 @@ def test_revocation_denies_the_token(provider):
 
 def test_revocation_set_is_bounded(provider, monkeypatch):
     monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_DENIED", 5)
-    results = [provider._claim(f"tok{i}", 1_800_000_000 + 100) for i in range(8)]
+    results = [provider._claim(f"tok{i}", 1_800_000_000 + 100, None, "o") for i in range(8)]
     assert results == [True] * 5 + [False] * 3  # full of live denials: refuse, never evict
     assert len(provider._denied) == 5 and "tok0" in provider._denied
 

@@ -23,6 +23,7 @@ from ..field_policy import FIELD_POLICY_FILE_ENV, get_field_policy, reset_field_
 from ..server_core import mcp, report_policy_resolution
 from .client import verify_odoo_login
 from .config import LOCAL_HOSTS, BridgeConfig, BridgeConfigError
+from .netutil import TrustedProxies
 from .oauth_routes import IpThrottleMiddleware, build_oauth_routes
 from .provider import DEFAULT_SCOPE, BridgeOAuthProvider, Verifier
 from .runtime import BridgeRuntime, ensure_state_dir, make_runtime
@@ -92,9 +93,9 @@ def ensure_field_policy(config: BridgeConfig) -> list[str]:
         print(line, file=sys.stderr)
     if error is not None:
         raise error
-    if config.policy_instance not in get_field_policy().instances():
+    if not get_field_policy()._by_instance.get(config.policy_instance):
         raise BridgeConfigError(
-            f"the field-ACL policy has no rules under {config.policy_instance!r} "
+            f"the field-ACL policy has no model rules under {config.policy_instance!r} "
             "(set ODOO_MCP_BRIDGE_POLICY_INSTANCE to the key your policy file uses)"
         )
     return lines
@@ -117,6 +118,7 @@ def build_bridge(
     ensure_state_dir(config.state_dir)
     runtime = runtime or make_runtime(config)
     runtime.audit.check_writable()
+    trusted = TrustedProxies(config.trusted_proxies)
     provider = BridgeOAuthProvider(
         seal_key=key,
         instance=config.instance,
@@ -126,6 +128,7 @@ def build_bridge(
         allowed_redirect_hosts=config.allowed_redirect_hosts,
         allow_localhost_redirects=config.allow_localhost_redirects,
         client_ip_header=config.client_ip_header,
+        trusted_proxies=trusted,
     )
     tools = apply_bridge_surface(runtime)
     undo = install_seams(runtime)
@@ -163,7 +166,11 @@ def build_bridge(
         transport_security=transport_security(config),
         host=config.host,
     )
-    app.add_middleware(IpThrottleMiddleware, client_ip_header=config.client_ip_header)
+    app.add_middleware(
+        IpThrottleMiddleware,
+        client_ip_header=config.client_ip_header,
+        trusted_proxies=trusted,
+    )
     return BridgeBuild(app=app, runtime=runtime, provider=provider, tools=tools, undo=undo)
 
 

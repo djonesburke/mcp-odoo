@@ -54,7 +54,8 @@ from each request's own token and never from a long-lived session.
 | `ODOO_MCP_BRIDGE_MAX_LIMIT` | no | Largest record limit a read may request (default 200). |
 | `ODOO_MCP_BRIDGE_ALLOWED_REDIRECT_HOSTS` | no | CSV of exact hosts allowed as OAuth redirect URIs, `https` only. Default `claude.ai,claude.com`. |
 | `ODOO_MCP_BRIDGE_ALLOW_LOCALHOST_REDIRECTS` | no | Test only (default off): also accept `http://localhost` redirects. |
-| `ODOO_MCP_BRIDGE_CLIENT_IP_HEADER` | no | Header carrying the real client IP behind a proxy (for example `CF-Connecting-IP`); the last value is used. Without it the socket peer is used, which is the proxy itself. |
+| `ODOO_MCP_BRIDGE_CLIENT_IP_HEADER` | no | Header carrying the real client IP behind a proxy (for example `CF-Connecting-IP`); the last value is used. It is honoured **only** when the socket peer is loopback or listed in `ODOO_MCP_BRIDGE_TRUSTED_PROXIES`; otherwise the peer address is used, so a client cannot spoof it. |
+| `ODOO_MCP_BRIDGE_TRUSTED_PROXIES` | no | CSV of IPs/CIDRs allowed to set that header (default: loopback only). |
 | `ODOO_MCP_BRIDGE_ALLOWED_ORIGINS` | no | Extra CSV of allowed `Origin` values. |
 | `ODOO_TIMEOUT`, `ODOO_VERIFY_SSL` | no | As for `odoo-mcp`. |
 
@@ -159,10 +160,11 @@ If the audit line cannot be written the result is withheld (no audit, no data).
 - **Seal key compromise exposes the API keys inside every live token** and lets
   an attacker mint tokens. Protect the file (0600, own account) and rotate on
   suspicion. Rotation revokes everyone.
-- **Revocation is a bounded in-memory deny set** of token ids (`jti`, 10,000
-  entries): it is lost on restart and revoking an access token does not revoke its
+- **Revocation is a bounded in-memory deny set** of token ids (`jti`, 100,000
+  entries, at most 1,500 live per user: a user who refreshes hourly holds about 720
+  a month because every rotated refresh token is denied until its own expiry): it is lost on restart and revoking an access token does not revoke its
   refresh token. An unexpired entry is never evicted; when the set is full of live
-  entries a refresh is refused. Token encoding is strict (a padded or re-spelled
+  entries a refresh is refused (the user signs in again). Token encoding is strict (a padded or re-spelled
   copy of a token is invalid). Refresh rotation is atomic: of two concurrent
   refreshes with one token exactly one succeeds. Revoke the Odoo API key itself to
   end a user's access for good.
@@ -172,13 +174,80 @@ If the audit line cannot be written the result is withheld (no audit, no data).
   re-checked when `clients.json` loads (non-conforming clients are dropped with a
   log line) and again at `/authorize`. `/register`, `/authorize` and `/token` are
   throttled per client IP; when the client table (1,000) or the pending sign-in
-  table (500) is full, new entries are refused rather than evicting old ones.
+  table (500) is full, new entries are refused rather than evicting active ones.
+  Each address may hold at most 5 pending sign-ins. A client that never completed
+  a sign-in expires after 24 hours and is the first thing evicted when the client
+  table is full; if none can be evicted, registration is refused. `clients.json`
+  records `registered_at` and `last_used` per client.
   Registration always stores and returns `token_endpoint_auth_method: none` and
   no secret (the SDK would otherwise mint one); metadata advertises only `none`.
 - The auth code is held in memory with the user's key for up to five minutes.
 - Sign-in attempts are limited to 5 a minute per client IP; configure
   `ODOO_MCP_BRIDGE_CLIENT_IP_HEADER` behind a proxy or the limit is shared by all
   users of the proxy.
+- **Per-IP limits are shared by everyone behind one address.** `/register`,
+  `/authorize`, `/token`, `/revoke` and `/signin` are limited per client IP, so
+  people behind one office NAT or egress IP share those budgets (a burst of
+  sign-ins or refreshes from one site can be answered with 429 for a minute). The
+  limiter's key table is bounded: expired keys go first, then the least recently
+  used key that is not over budget; if every key is over budget new keys are
+  refused, so rotating keys cannot reset an attacker's bucket or grow memory.
+- **Odoo down is not a bad password.** Transport errors, timeouts and 5xx/429 from
+  Odoo give the sign-in page a 503 and a refresh an `invalid_request` ("Odoo is
+  temporarily unavailable"), and the refresh token is not consumed. Only a refused
+  key is `invalid_grant`.
 - JSON-2 only: XML-RPC and `/web/*` paths are never used for sign-in or tool
   calls (except the best-effort `/web/version` read inside `get_odoo_profile`,
   whose failure is tolerated).
+
+## Deploy
+
+**Install** the bridge from the lock file, with hashes, not from a loose range:
+
+```bash
+uv export --frozen --no-dev --extra bridge --hashes > requirements-bridge.txt
+pip install --require-hashes -r requirements-bridge.txt
+pip install --no-deps .
+```
+
+The `bridge` extra pins `mcp==2.0.0` (and `cryptography`); the core `odoo-mcp`
+package keeps its `mcp>=2,<3` range, so upstream installs are unaffected. The
+bridge also **refuses to start** when the installed `mcp` is not the tested
+version, naming both versions (`TESTED_MCP_VERSION` in
+`odoo_mcp/bridge/config.py`).
+
+**Before switching over**, in the target environment (same Python, same lock
+file), run the four bridge test files and the full suite:
+
+```bash
+python -m pytest tests/test_bridge_core.py tests/test_bridge_oauth.py \n    tests/test_bridge_surface.py tests/test_bridge_hardening.py
+python -m pytest
+```
+
+Start the new version on a different port, sign in once, and only then move the
+tunnel or proxy.
+
+**Upgrading `mcp`.** The bridge reaches into SDK internals that are not public
+API. When the SDK changes, re-verify each of these (the tests above exercise them)
+and only then bump `TESTED_MCP_VERSION` and the `bridge` extra:
+
+- `MCPServer._tool_manager._tools`, `_resource_manager._resources` /
+  `_templates`, `_prompt_manager._prompts` (the surface is trimmed by editing them)
+- `Tool.fn` (replaced by a wrapper) and the tool call path passing `ctx` as a
+  keyword argument
+- `MCPServer._lowlevel_server.lifespan` (replaced so no client is cached across
+  users), `MCPServer._auth_server_provider` (left unset so the SDK adds no routes),
+  `MCPServer._token_verifier`, `MCPServer._custom_starlette_routes`,
+  `MCPServer.settings.auth`
+- `streamable_http_app(stateless_http=True)` giving each request its own context,
+  and `AuthContextMiddleware` / `get_access_token()` carrying the token into the
+  tool call
+- `ProviderTokenVerifier`, `create_auth_routes`, `build_metadata`,
+  `RegistrationHandler`, `RevocationHandler`, `ClientAuthenticator`,
+  `MetadataHandler`, `cors_middleware`, `construct_redirect_uri`
+- the `OAuthAuthorizationServerProvider` protocol and the token handler's checks
+  (refresh token `client_id` equality, PKCE, revoke matching `token.client_id`)
+- `AppContext` field names used by the tools (`schema_cache`,
+  `_default_instance_name`, `odoo`, `get_client`) and the `_srv()` seams in
+  `odoo_mcp.server`
+- `OAuthClientInformationFull.validate_redirect_uri`

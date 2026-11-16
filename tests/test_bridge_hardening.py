@@ -27,6 +27,7 @@ from starlette.testclient import TestClient
 from odoo_mcp import server as srv
 from odoo_mcp.bridge import surface
 from odoo_mcp.bridge.app import build_bridge, ensure_field_policy
+from odoo_mcp.bridge.client import BridgeAuthError
 from odoo_mcp.bridge.config import BridgeConfigError, load_config
 from odoo_mcp.bridge.oauth_routes import IpThrottleMiddleware, build_oauth_routes
 from odoo_mcp.bridge.provider import BridgeOAuthProvider
@@ -158,13 +159,13 @@ def test_policy_startup_refusals(runtime, restore_global_mcp, tmp_path, monkeypa
     wrong = tmp_path / "wrong.json"
     wrong.write_text(json.dumps({"field_acl": {"elsewhere": {"*": {"deny": ["x"]}}}}))
     monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(wrong))
-    with pytest.raises(BridgeConfigError, match="no rules under 'default'"):
+    with pytest.raises(BridgeConfigError, match="no model rules under 'default'"):
         ensure_field_policy(cfg)
 
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"field_acl": {}}))
     monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(empty))
-    with pytest.raises(BridgeConfigError, match="no rules under"):
+    with pytest.raises(BridgeConfigError, match="no model rules under"):
         ensure_field_policy(cfg)
 
 
@@ -387,7 +388,7 @@ def test_full_deny_set_refuses_refresh_instead_of_forgetting(tmp_path, monkeypat
     client = TestClient(_app(provider), base_url=ISSUER)
     client_id, body = _tokens(provider, client)
     monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_DENIED", 1)
-    assert provider._claim("someone-else", int(time.time()) + 1000) is True
+    assert provider._claim("someone-else", int(time.time()) + 1000, None, "o") is True
     refused = _refresh(client, client_id, body["refresh_token"])
     assert refused.status_code == 400
     assert "someone-else" in provider._denied  # the earlier denial survived
@@ -398,11 +399,11 @@ def test_expired_denials_are_reclaimed_when_full(tmp_path, monkeypatch):
     now = [1_800_000_000.0]
     provider = _provider(tmp_path / "s", now=now)
     monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_DENIED", 2)
-    assert provider._claim("a", now[0] + 10) is True
-    assert provider._claim("b", now[0] + 1000) is True
-    assert provider._claim("c", now[0] + 1000) is False
+    assert provider._claim("a", now[0] + 10, None, "o") is True
+    assert provider._claim("b", now[0] + 1000, None, "o") is True
+    assert provider._claim("c", now[0] + 1000, None, "o") is False
     now[0] += 11
-    assert provider._claim("c", now[0] + 1000) is True
+    assert provider._claim("c", now[0] + 1000, None, "o") is True
     assert set(provider._denied) == {"b", "c"}
 
 
@@ -459,9 +460,10 @@ def test_loading_clients_drops_non_conforming_redirects(tmp_path, caplog):
     client = TestClient(_app(provider), base_url=ISSUER)
     good = _register(client).json()["client_id"]
     path = state / "clients.json"
-    entries = json.loads(path.read_text())
+    data = json.loads(path.read_text())
+    entries = data["clients"]
     evil = dict(entries[0], client_id="evil-client", redirect_uris=["https://evil.example.com/cb"])
-    path.write_text(json.dumps([*entries, evil]))
+    path.write_text(json.dumps({**data, "clients": [*entries, evil]}))
     with caplog.at_level(logging.WARNING):
         restarted = _provider(state)
     assert _run(restarted.get_client(good)) is not None
@@ -534,7 +536,7 @@ def test_register_authorize_and_token_are_throttled_per_ip(tmp_path):
         limits={"/register": 2, "/authorize": 2, "/token": 2},
         client_ip_header="X-Real-IP",
     )
-    client = TestClient(app, base_url=ISSUER)
+    client = TestClient(app, base_url=ISSUER, client=("127.0.0.1", 50000))
     ip_a, ip_b = {"X-Real-IP": "203.0.113.1"}, {"X-Real-IP": "203.0.113.2"}
     body = {
         "redirect_uris": [REDIRECT],
@@ -610,3 +612,387 @@ def test_pending_sign_ins_are_not_evicted_when_full(tmp_path, monkeypatch):
         follow_redirects=False,
     )
     assert done.status_code == 302 and "code=" in done.headers["location"]
+
+
+# ======================================================== round three: S1-S4, D, nits
+
+
+def _registered(client, n=1):
+    return [_register(client).json()["client_id"] for _ in range(n)]
+
+
+def test_clients_json_tracks_registration_and_use(tmp_path):
+    now = [1_800_000_000.0]
+    provider = _provider(tmp_path / "s", now=now)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    client_id, _ = _tokens(provider, client)
+    data = json.loads((tmp_path / "s" / "clients.json").read_text())
+    meta = data["meta"][client_id]
+    assert meta["registered_at"] == now[0]
+    assert meta["last_used"] == now[0]  # sign-in and token issue both count as use
+    other = _registered(client)[0]
+    assert json.loads((tmp_path / "s" / "clients.json").read_text())["meta"][other][
+        "last_used"
+    ] is None
+    reloaded = _provider(tmp_path / "s", now=now)  # survives a restart
+    assert reloaded._meta[client_id]["last_used"] == now[0]
+
+
+def test_legacy_list_clients_file_still_loads(tmp_path):
+    state = tmp_path / "s"
+    provider = _provider(state)
+    client_id = _registered(TestClient(_app(provider), base_url=ISSUER))[0]
+    path = state / "clients.json"
+    path.write_text(json.dumps(json.loads(path.read_text())["clients"]))  # old format
+    assert _run(_provider(state).get_client(client_id)) is not None
+
+
+def test_full_client_table_evicts_expired_never_used_clients_first(tmp_path, monkeypatch):
+    monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_CLIENTS", 3)
+    now = [1_800_000_000.0]
+    provider = _provider(tmp_path / "s", now=now)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    used_id, _ = _tokens(provider, client)  # completed a sign-in: never expires
+    a, b = _registered(client, 2)
+    # nothing is old enough yet: refuse, do not evict
+    assert _register(client).status_code == 400
+    now[0] += 24 * 3600 + 1
+    fresh = _register(client)
+    assert fresh.status_code == 201
+    survivors = set(provider._clients)
+    assert used_id in survivors and fresh.json()["client_id"] in survivors
+    assert len(survivors) == 3 and len({a, b} & survivors) == 1  # oldest unused went first
+    assert set(provider._meta) == survivors
+
+
+def test_full_client_table_refuses_when_nothing_can_be_evicted(tmp_path, monkeypatch):
+    monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_CLIENTS", 1)
+    now = [1_800_000_000.0]
+    provider = _provider(tmp_path / "s", now=now)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    used_id, _ = _tokens(provider, client)
+    now[0] += 30 * 24 * 3600  # a used client never expires
+    assert _register(client).status_code == 400
+    assert _run(provider.get_client(used_id)) is not None
+
+
+def test_pending_sign_ins_are_capped_per_ip(tmp_path):
+    provider = _provider(tmp_path / "s")
+    client = TestClient(
+        _app(provider, client_ip_header="X-Real-IP"), base_url=ISSUER, client=("127.0.0.1", 1)
+    )
+    client_id = _registered(client)[0]
+    _, challenge = _pkce()
+    noisy, quiet = {"X-Real-IP": "203.0.113.50"}, {"X-Real-IP": "203.0.113.51"}
+
+    def start(headers):
+        return client.get(
+            "/authorize",
+            params={
+                "client_id": client_id,
+                "redirect_uri": REDIRECT,
+                "response_type": "code",
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+            },
+            headers=headers,
+            follow_redirects=False,
+        )
+
+    results = [start(noisy) for _ in range(6)]
+    assert all("/signin?req=" in r.headers["location"] for r in results[:5])
+    assert "error=temporarily_unavailable" in results[5].headers["location"]
+    assert "/signin?req=" in start(quiet).headers["location"]  # others unaffected
+    assert len(provider._pending) == 6
+
+
+def test_pending_cap_frees_up_when_sign_in_completes(tmp_path):
+    provider = _provider(tmp_path / "s")
+    client = TestClient(_app(provider), base_url=ISSUER)
+    for _ in range(5):
+        _full_flow(client)  # each one completes, so none stay pending
+    assert not provider._pending
+
+
+def test_audit_file_mode_check(runtime, tmp_path, monkeypatch):
+    from odoo_mcp.bridge import runtime as runtime_module
+
+    runtime.audit.path = str(tmp_path / "loose.jsonl")
+    (tmp_path / "loose.jsonl").write_text("")
+    monkeypatch.setattr(runtime_module, "_file_mode", lambda path: 0o644)
+    monkeypatch.setattr(runtime_module, "_IS_POSIX", True)
+    with pytest.raises(BridgeConfigError) as info:
+        runtime.audit.check_writable()
+    assert "loose.jsonl" in str(info.value) and "0644" in str(info.value)
+    monkeypatch.setattr(runtime_module, "_file_mode", lambda path: 0o600)
+    runtime.audit.check_writable()  # tight file is accepted
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_loose_audit_file_refused_for_real(runtime, tmp_path):
+    path = tmp_path / "audit-real.jsonl"
+    path.write_text("")
+    path.chmod(0o664)
+    runtime.audit.path = str(path)
+    with pytest.raises(BridgeConfigError, match="chmod 600"):
+        runtime.audit.check_writable()
+
+
+def test_clients_json_is_tightened_at_startup(tmp_path, monkeypatch):
+    from odoo_mcp.bridge import provider as provider_module
+
+    state = tmp_path / "s"
+    first = _provider(state)
+    _registered(TestClient(_app(first), base_url=ISSUER))
+    calls = []
+    monkeypatch.setattr(provider_module, "_restrict", lambda path: calls.append(path))
+    _provider(state)
+    assert calls == [state / "clients.json"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_clients_json_chmod_for_real(tmp_path):
+    state = tmp_path / "s"
+    _registered(TestClient(_app(_provider(state)), base_url=ISSUER))
+    (state / "clients.json").chmod(0o644)
+    _provider(state)
+    assert stat.S_IMODE((state / "clients.json").stat().st_mode) == 0o600
+
+
+# ------------------------------------------------------------ spoofed headers
+
+
+def _request(peer, headers=None):
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+        "client": (peer, 1234),
+    }
+    return Request(scope)
+
+
+def test_client_ip_header_only_from_trusted_peers():
+    from odoo_mcp.bridge.netutil import TrustedProxies, client_ip
+
+    default = TrustedProxies()
+    spoof = {"X-Real-IP": "198.51.100.9"}
+    assert client_ip(_request("203.0.113.5", spoof), "x-real-ip", default) == "203.0.113.5"
+    assert client_ip(_request("127.0.0.1", spoof), "x-real-ip", default) == "198.51.100.9"
+    assert client_ip(_request("::1", spoof), "x-real-ip", default) == "198.51.100.9"
+    assert client_ip(_request("127.0.0.1"), "x-real-ip", default) == "127.0.0.1"
+    assert client_ip(_request("testclient", spoof), "x-real-ip", default) == "testclient"
+    listed = TrustedProxies(["10.0.0.0/8", "192.0.2.7"])
+    assert client_ip(_request("10.1.2.3", spoof), "x-real-ip", listed) == "198.51.100.9"
+    assert client_ip(_request("192.0.2.7", spoof), "x-real-ip", listed) == "198.51.100.9"
+    assert client_ip(_request("127.0.0.1", spoof), "x-real-ip", listed) == "127.0.0.1"
+    assert client_ip(_request("10.1.2.3", spoof), None, listed) == "10.1.2.3"
+    chained = {"X-Forwarded-For": "1.1.1.1, 198.51.100.77"}
+    assert client_ip(_request("127.0.0.1", chained), "x-forwarded-for", default) == "198.51.100.77"
+
+
+def test_rotating_a_spoofed_header_does_not_reset_the_throttle(tmp_path):
+    provider = _provider(tmp_path / "s")
+    app = _app(provider, limits={"/register": 2}, client_ip_header="X-Real-IP")
+    body = {
+        "redirect_uris": [REDIRECT],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+    }
+    outside = TestClient(app, base_url=ISSUER, client=("203.0.113.9", 1))
+    codes = [
+        outside.post("/register", json=body, headers={"X-Real-IP": f"198.51.100.{i}"}).status_code
+        for i in range(4)
+    ]
+    assert codes == [201, 201, 429, 429]  # one peer, one bucket
+
+
+def test_bounded_limiter_caps_memory_and_keeps_blocking_attackers():
+    from odoo_mcp.bridge.netutil import BoundedWindowLimiter
+
+    now = [1000.0]
+    limiter = BoundedWindowLimiter(2, max_keys=3, clock=lambda: now[0])
+    assert limiter.hit("legit") is True
+    for attacker in ("a1", "a2"):
+        assert [limiter.hit(attacker) for _ in range(3)] == [True, True, False]
+    assert len(limiter) == 3
+    # new keys keep arriving: the table never grows, and the attackers' own
+    # over-budget keys are never the ones forgotten
+    for i in range(20):
+        limiter.hit(f"rot{i}")
+        assert len(limiter) <= 3
+    assert limiter.hit("a1") is False and limiter.hit("a2") is False
+    now[0] += 61  # the window passes: everything is forgotten, memory stays bounded
+    assert limiter.hit("a1") is True
+    assert len(limiter) <= 3
+
+
+def test_bounded_limiter_refuses_new_keys_when_every_key_is_over_budget():
+    from odoo_mcp.bridge.netutil import BoundedWindowLimiter
+
+    now = [1000.0]
+    limiter = BoundedWindowLimiter(1, max_keys=2, clock=lambda: now[0])
+    for key in ("a", "b"):
+        assert limiter.hit(key) is True
+        assert limiter.hit(key) is False
+    assert limiter.hit("newcomer") is False  # global ceiling
+    assert len(limiter) == 2
+    now[0] += 61
+    assert limiter.hit("newcomer") is True
+
+
+# ---------------------------------------------------------------------- nits
+
+
+def test_policy_key_needs_a_model_rule_not_just_the_key(
+    runtime, restore_global_mcp, tmp_path, monkeypatch
+):
+    path = tmp_path / "keyonly.json"
+    path.write_text(json.dumps({"field_acl": {"default": {}}}))
+    monkeypatch.setenv("ODOO_MCP_FIELD_POLICY_FILE", str(path))
+    with pytest.raises(BridgeConfigError, match="no model rules under 'default'"):
+        ensure_field_policy(runtime.config)
+
+
+def test_release_does_not_undo_a_concurrent_revoke(tmp_path):
+    provider = _provider(tmp_path / "s")
+    assert provider._claim("jti-1", 2_000_000_000, 7, "refresh-nonce") is True
+    assert provider._claim("jti-1", 2_000_000_000, 7, "other") is None  # already claimed
+    assert provider._claim("jti-1", 2_000_000_000, 7, "revoked") is True  # revoke takes over
+    provider._release("jti-1", "refresh-nonce")
+    assert "jti-1" in provider._denied  # the revocation survives
+    provider._claim("jti-2", 2_000_000_000, 7, "mine")
+    provider._release("jti-2", "not-mine")
+    assert "jti-2" in provider._denied
+    provider._release("jti-2", "mine")
+    assert "jti-2" not in provider._denied
+
+
+def test_revoke_during_a_failing_refresh_stays_revoked(tmp_path):
+    entered = threading.Event()
+    proceed = threading.Event()
+
+    def verifier(login, key):
+        entered.set()
+        proceed.wait(5)
+        raise BridgeAuthError("invalid credentials")
+
+    provider = _provider(tmp_path / "s", verifier=Odoo())
+    client = TestClient(_app(provider), base_url=ISSUER)
+    client_id, body = _tokens(provider, client)
+    registered = _run(provider.get_client(client_id))
+    loaded = _run(provider.load_refresh_token(registered, body["refresh_token"]))
+    provider._verifier = verifier
+
+    async def scenario():
+        refresh = asyncio.create_task(provider.exchange_refresh_token(registered, loaded, []))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        await provider.revoke_token(loaded)
+        proceed.set()
+        with pytest.raises(TokenError):
+            await refresh
+
+    asyncio.run(scenario())
+    assert provider.is_revoked(loaded.jti)
+    assert _run(provider.load_refresh_token(registered, body["refresh_token"])) is None
+
+
+def test_signin_when_odoo_is_unreachable_is_a_503_not_a_bad_password(tmp_path):
+    from odoo_mcp.bridge.client import BridgeUnavailableError
+
+    def down(login, key):
+        raise BridgeUnavailableError("odoo unavailable")
+
+    provider = _provider(tmp_path / "s", verifier=down)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    reg = _register(client).json()
+    _, challenge = _pkce()
+    page = client.get(_authorize(client, reg["client_id"], challenge).headers["location"])
+    fields = _signin_fields(page.text)
+    response = client.post(
+        "/signin", data={**fields, "login": "ann@example.com", "api_key": KEY}
+    )
+    assert response.status_code == 503
+    assert "Sign-in failed" not in response.text and KEY not in response.text
+    assert fields["req"] in provider._pending  # the user can try again
+
+
+def test_refresh_when_odoo_is_unreachable_is_not_invalid_grant_and_not_burned(tmp_path):
+    from odoo_mcp.bridge.client import BridgeUnavailableError
+
+    state = {"down": False}
+    odoo = Odoo()
+
+    def verifier(login, key):
+        if state["down"]:
+            raise BridgeUnavailableError("odoo unavailable")
+        return odoo(login, key)
+
+    provider = _provider(tmp_path / "s", verifier=verifier)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    client_id, body = _tokens(provider, client)
+    state["down"] = True
+    down = _refresh(client, client_id, body["refresh_token"])
+    assert down.status_code == 400
+    assert down.json()["error"] != "invalid_grant"
+    assert "unavailable" in down.json()["error_description"]
+    state["down"] = False
+    assert _refresh(client, client_id, body["refresh_token"]).status_code == 200
+
+
+def test_bad_credentials_on_refresh_stay_invalid_grant(tmp_path):
+    odoo = Odoo()
+    provider = _provider(tmp_path / "s", verifier=odoo)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    client_id, body = _tokens(provider, client)
+    odoo.users.clear()
+    refused = _refresh(client, client_id, body["refresh_token"])
+    assert refused.json()["error"] == "invalid_grant"
+
+
+def test_revoke_is_throttled_per_ip(tmp_path):
+    provider = _provider(tmp_path / "s")
+    app = _app(provider, limits={"/revoke": 2}, client_ip_header="X-Real-IP")
+    client = TestClient(app, base_url=ISSUER, client=("127.0.0.1", 1))
+    statuses = [
+        client.post(
+            "/revoke",
+            data={"client_id": "x", "token": "t"},
+            headers={"X-Real-IP": "203.0.113.4"},
+        ).status_code
+        for _ in range(3)
+    ]
+    assert statuses[2] == 429 and 429 not in statuses[:2]
+
+
+def test_default_throttle_covers_revoke():
+    from odoo_mcp.bridge.oauth_routes import THROTTLE_LIMITS
+
+    assert set(THROTTLE_LIMITS) == {"/register", "/authorize", "/token", "/revoke"}
+
+
+def test_live_denials_are_capped_per_user(tmp_path, monkeypatch):
+    monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_DENIED_PER_UID", 2)
+    provider = _provider(tmp_path / "s")
+    far = int(time.time()) + 10_000
+    assert provider._claim("a", far, 7, "o") is True
+    assert provider._claim("b", far, 7, "o") is True
+    assert provider._claim("c", far, 7, "o") is False  # this user is at their share
+    assert provider._claim("d", far, 8, "o") is True  # others are unaffected
+    assert set(provider._denied) == {"a", "b", "d"}  # nothing was forgotten
+
+
+def test_per_user_cap_refuses_refresh_and_reclaims_expired(tmp_path, monkeypatch):
+    monkeypatch.setattr("odoo_mcp.bridge.provider.MAX_DENIED_PER_UID", 1)
+    now = [1_800_000_000.0]
+    provider = _provider(tmp_path / "s", now=now)
+    client = TestClient(_app(provider), base_url=ISSUER)
+    client_id, body = _tokens(provider, client)  # uid 7
+    assert provider._claim("old", now[0] + 50, 7, "o") is True
+    assert _refresh(client, client_id, body["refresh_token"]).status_code == 400  # cap hit
+    now[0] += 51  # the old denial expires and is reclaimed
+    assert _refresh(client, client_id, body["refresh_token"]).status_code == 200

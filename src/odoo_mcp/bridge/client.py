@@ -18,7 +18,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..diagnostics import READ_ONLY_METHODS
-from ..odoo_client import OdooClient
+from ..odoo_client import OdooClient, OdooJson2Error
 
 #: ``READ_ONLY_METHODS`` plus the two read-only aggregation methods that
 #: ``aggregate_records`` and ``data_quality_report`` call. Nothing that
@@ -32,6 +32,27 @@ class BridgeMethodRefused(PermissionError):
 
 class BridgeAuthError(Exception):
     """Odoo credentials were not accepted (message is deliberately generic)."""
+
+
+class BridgeUnavailableError(Exception):
+    """Odoo could not be reached (transport error, timeout, 5xx); not a bad key."""
+
+
+def _classify(exc: BaseException) -> Exception:
+    """Bad credentials stay ``BridgeAuthError``; reachability trouble is distinct."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OdooJson2Error):
+            status = getattr(current, "status_code", None)
+            if isinstance(status, int) and (status >= 500 or status == 429):
+                return BridgeUnavailableError("odoo unavailable")
+            return BridgeAuthError("invalid credentials")
+        if isinstance(current, (OSError, TimeoutError)):
+            return BridgeUnavailableError("odoo unavailable")
+        current = current.__cause__ or current.__context__
+    return BridgeAuthError("invalid credentials")
 
 
 def _guard(method: str) -> None:
@@ -112,10 +133,10 @@ def verify_odoo_login(
             raise BridgeAuthError("invalid credentials")
         rows = client.execute_method("res.users", "read", ids=[uid], fields=["login"])
         owner = rows[0].get("login") if isinstance(rows, list) and rows else None
-    except BridgeAuthError:
+    except (BridgeAuthError, BridgeUnavailableError):
         raise
     except Exception as exc:  # noqa: BLE001 - never leak transport detail
-        raise BridgeAuthError("invalid credentials") from exc
+        raise _classify(exc) from exc
     if not isinstance(owner, str) or owner.strip().lower() != login.strip().lower():
         raise BridgeAuthError("invalid credentials")
     return uid

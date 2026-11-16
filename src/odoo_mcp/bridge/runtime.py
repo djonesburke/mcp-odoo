@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import threading
 import time
 from collections.abc import Callable
@@ -20,13 +21,20 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from ..rate_limit import SlidingWindowRateTracker
 from ..schema_cache import BoundedTTLCache, _schema_cache_settings
 from .client import UserClientCache, build_user_client
-from .config import BridgeConfig
+from .config import BridgeConfig, BridgeConfigError
 from .provider import BridgeAccessToken
 
 #: ``(login, key) -> client`` seam so tests never touch the network.
 ClientFactory = Callable[[str, str], Any]
 
 MAX_AUDIT_FIELDS = 50
+
+
+_IS_POSIX = os.name == "posix"
+
+
+def _file_mode(path: str) -> int:
+    return stat.S_IMODE(os.stat(path).st_mode)
 
 
 class BridgeIdentityError(PermissionError):
@@ -55,6 +63,13 @@ class AuditLog:
 
     def check_writable(self) -> None:
         """Create the file (0600 on POSIX) if needed and prove it is appendable."""
+        if _IS_POSIX and os.path.exists(self.path):
+            mode = _file_mode(self.path)
+            if mode & 0o077:
+                raise BridgeConfigError(
+                    f"audit file {self.path} is group/world accessible "
+                    f"(mode {mode:04o}); run chmod 600"
+                )
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         os.close(fd)
 

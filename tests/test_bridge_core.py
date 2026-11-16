@@ -14,10 +14,16 @@ from odoo_mcp.bridge.client import (
     BridgeAuthError,
     BridgeMethodRefused,
     BridgeOdooClient,
+    BridgeUnavailableError,
     UserClientCache,
     verify_odoo_login,
 )
-from odoo_mcp.bridge.config import BridgeConfigError, load_config
+from odoo_mcp.bridge.config import (
+    TESTED_MCP_VERSION,
+    BridgeConfigError,
+    check_sdk_version,
+    load_config,
+)
 from odoo_mcp.bridge.seal import (
     SEAL_KEY_BYTES,
     SealKeyError,
@@ -27,6 +33,7 @@ from odoo_mcp.bridge.seal import (
     unseal,
 )
 from odoo_mcp.diagnostics import READ_ONLY_METHODS
+from odoo_mcp.odoo_client import OdooJson2Error
 
 KEY = bytes(range(32))
 
@@ -254,11 +261,60 @@ def test_verify_login_rejects_mismatched_login(monkeypatch):
 
 def test_verify_login_failure_is_generic(monkeypatch):
     _patch_login(monkeypatch, fail=True)
-    with pytest.raises(BridgeAuthError) as info:
+    with pytest.raises(BridgeUnavailableError) as info:
         verify_odoo_login(
             url="https://odoo.example.com", db="d", login="ann@example.com", key="SECRETKEY"
         )
     assert "SECRETKEY" not in str(info.value) and "blocked" not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "error, expected",
+    [
+        (ConnectionError("down"), BridgeUnavailableError),
+        (TimeoutError("slow"), BridgeUnavailableError),
+        (OSError("reset"), BridgeUnavailableError),
+        (OdooJson2Error("boom", status_code=502), BridgeUnavailableError),
+        (OdooJson2Error("boom", status_code=503), BridgeUnavailableError),
+        (OdooJson2Error("slow down", status_code=429), BridgeUnavailableError),
+        (OdooJson2Error("bad key", status_code=401), BridgeAuthError),
+        (OdooJson2Error("denied", status_code=403), BridgeAuthError),
+        (ValueError("anything else"), BridgeAuthError),
+    ],
+)
+def test_verify_login_separates_unreachable_from_bad_credentials(monkeypatch, error, expected):
+    def fake(self, model, method, payload):
+        raise error
+
+    monkeypatch.setattr("odoo_mcp.odoo_client.OdooClient._json2_call", fake)
+    with pytest.raises(expected) as info:
+        verify_odoo_login(url="https://odoo.example.com", db="d", login="a@example.com", key="k")
+    assert type(info.value) is expected
+
+
+def test_sdk_version_check_names_both_versions():
+    check_sdk_version("2.0.0")
+    check_sdk_version()  # the installed SDK is the tested one
+    with pytest.raises(BridgeConfigError) as info:
+        check_sdk_version("2.1.0")
+    assert "2.1.0" in str(info.value) and TESTED_MCP_VERSION in str(info.value)
+    with pytest.raises(BridgeConfigError):
+        check_sdk_version("not installed")
+
+
+def test_cli_refuses_an_untested_sdk(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("importlib.metadata.version", lambda name: "9.9.9")
+    assert cli.main([], env=_env(tmp_path)) == 2
+    err = capsys.readouterr().err
+    assert "9.9.9" in err and TESTED_MCP_VERSION in err
+
+
+def test_trusted_proxies_config(tmp_path):
+    assert load_config(_env(tmp_path)).trusted_proxies == ("127.0.0.0/8", "::1/128")
+    config = load_config(_env(tmp_path, ODOO_MCP_BRIDGE_TRUSTED_PROXIES="10.0.0.0/8, 192.0.2.7"))
+    assert config.trusted_proxies == ("10.0.0.0/8", "192.0.2.7")
+    with pytest.raises(BridgeConfigError, match="TRUSTED_PROXIES"):
+        load_config(_env(tmp_path, ODOO_MCP_BRIDGE_TRUSTED_PROXIES="not-an-ip"))
 
 
 def test_verify_login_uses_json2_only(monkeypatch):

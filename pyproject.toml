@@ -23,7 +23,6 @@ authors = [
 dependencies = [
     "mcp>=2,<3",
     "requests>=2.31.0",
-    "cryptography>=42",
 ]
 
 [project.urls]
@@ -36,6 +35,12 @@ Security = "https://github.com/erpipe-org/mcp-odoo/security"
 "Hosted (ERPipe)" = "https://mcp.erpipe.com/"
 
 [project.optional-dependencies]
+# The hosted bridge pins the one MCP SDK version its internals were verified on
+# (odoo_mcp.bridge.config.TESTED_MCP_VERSION). The core package keeps mcp>=2,<3.
+bridge = [
+    "mcp==2.0.0",
+    "cryptography>=42",
+]
 dev = [
     "black",
     "isort",

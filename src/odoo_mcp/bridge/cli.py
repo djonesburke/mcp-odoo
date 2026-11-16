@@ -6,7 +6,7 @@ import argparse
 import sys
 from collections.abc import Mapping, Sequence
 
-from .config import BridgeConfigError, load_config
+from .config import BridgeConfigError, check_sdk_version, load_config
 from .seal import SealKeyError, generate_seal_key, load_seal_key
 
 
@@ -37,6 +37,7 @@ def main(argv: Sequence[str] | None = None, env: Mapping[str, str] | None = None
         print(f"odoo-mcp-bridge: wrote seal key to {args.generate_seal_key}", file=sys.stderr)
         return 0
     try:
+        check_sdk_version()
         config = load_config(env)
         load_seal_key(config.seal_key_path)
         # Imported only after the environment passed: importing the server

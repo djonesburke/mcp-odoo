@@ -7,8 +7,9 @@ The SDK's route factory is reused, then three things are tightened:
 * the advertised metadata lists only ``none`` for token and revocation;
 * ``/revoke`` accepts a public client that omits the (empty) ``client_secret``.
 
-``IpThrottleMiddleware`` rate-limits ``/register``, ``/authorize`` and
-``/token`` per client IP.
+``IpThrottleMiddleware`` rate-limits ``/register``, ``/authorize``, ``/token``
+and ``/revoke`` per client IP (bounded key table), and publishes the client IP
+for provider hooks that never see the request.
 """
 
 from __future__ import annotations
@@ -34,13 +35,12 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from ..rate_limit import SlidingWindowRateTracker
-from .provider import client_ip
+from .netutil import BoundedWindowLimiter, TrustedProxies, client_ip, request_ip_var
 
 WELL_KNOWN = "/.well-known/oauth-authorization-server"
 
 #: Calls per minute per client IP.
-THROTTLE_LIMITS = {"/register": 10, "/authorize": 30, "/token": 30}
+THROTTLE_LIMITS = {"/register": 10, "/authorize": 30, "/token": 30, "/revoke": 30}
 
 
 def _replay(request: Request, body: bytes) -> Request:
@@ -134,26 +134,34 @@ class IpThrottleMiddleware:
         app: ASGIApp,
         *,
         client_ip_header: str | None = None,
+        trusted_proxies: TrustedProxies | None = None,
         limits: dict[str, int] | None = None,
+        max_keys: int = 4096,
     ) -> None:
         self.app = app
         self._header = client_ip_header.lower() if client_ip_header else None
-        self._trackers = {
-            path: SlidingWindowRateTracker(window_seconds=60, max_calls=calls)
+        self._trusted = trusted_proxies or TrustedProxies()
+        self._limiters = {
+            path: BoundedWindowLimiter(calls, max_keys=max_keys)
             for path, calls in (limits or THROTTLE_LIMITS).items()
         }
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope.get("method") != "OPTIONS":
-            tracker = self._trackers.get(scope["path"])
-            if tracker is not None:
-                ip = client_ip(Request(scope), self._header)
-                if tracker.record(scope["path"], ip)["over_budget"]:
-                    response = JSONResponse(
-                        {"error": "slow_down", "error_description": "too many requests"},
-                        status_code=429,
-                        headers={"Retry-After": "60", "Cache-Control": "no-store"},
-                    )
-                    await response(scope, receive, send)
-                    return
-        await self.app(scope, receive, send)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        ip = client_ip(Request(scope), self._header, self._trusted)
+        limiter = self._limiters.get(scope["path"])
+        if limiter is not None and scope.get("method") != "OPTIONS" and not limiter.hit(ip):
+            response = JSONResponse(
+                {"error": "slow_down", "error_description": "too many requests"},
+                status_code=429,
+                headers={"Retry-After": "60", "Cache-Control": "no-store"},
+            )
+            await response(scope, receive, send)
+            return
+        reset = request_ip_var.set(ip)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            request_ip_var.reset(reset)
