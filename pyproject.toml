@@ -23,6 +23,7 @@ authors = [
 dependencies = [
     "mcp>=2,<3",
     "requests>=2.31.0",
+    "cryptography>=42",
 ]
 
 [project.urls]
@@ -47,10 +48,11 @@ dev = [
 
 [project.scripts]
 odoo-mcp = "odoo_mcp.__main__:main"
+odoo-mcp-bridge = "odoo_mcp.bridge.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["odoo_mcp"]
+packages = ["odoo_mcp", "odoo_mcp.bridge"]
 
 [tool.setuptools.package-data]
 odoo_mcp = ["data/*.json"]

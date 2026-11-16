@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **`odoo-mcp-bridge`**: a hosted, read-only, per-user mode. One streamable-HTTP
+  endpoint with its own OAuth sign-in (Odoo login + API key), sealed tokens, a
+  hard-coded read-only tool allowlist, a read-only client guard, per-user
+  throttling and a JSONL audit trail. See [docs/bridge.md](docs/bridge.md).
+  Adds `cryptography` as a direct dependency.
+
 ### Security
 
 - **Masked-field bypass paths closed** (2026-11-10 security scan, SW-178).

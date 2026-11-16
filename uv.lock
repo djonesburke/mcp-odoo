@@ -844,6 +844,7 @@ name = "odoo-mcp"
 version = "1.3.0+burke.23"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "mcp" },
     { name = "requests" },
 ]
@@ -863,6 +864,7 @@ dev = [
 requires-dist = [
     { name = "black", marker = "extra == 'dev'" },
     { name = "build", marker = "extra == 'dev'" },
+    { name = "cryptography", specifier = ">=42" },
     { name = "isort", marker = "extra == 'dev'" },
     { name = "mcp", specifier = ">=2,<3" },
     { name = "mypy", marker = "extra == 'dev'" },
