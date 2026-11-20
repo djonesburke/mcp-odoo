@@ -20,6 +20,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Optional
 
 from .. import server as srv
+from ..field_policy import use_field_policy
 from ..server_core import READ_ONLY_TOOL, AppContext, mcp, package_version
 from .runtime import (
     BridgeIdentityError,
@@ -311,6 +312,7 @@ def wrap_tool(tool: Any, runtime: BridgeRuntime) -> None:
         try:
             user = current_user()
             uid, login = user.uid, user.login
+            policy = runtime.policy_for(login)
             verdict = limiter.record(runtime.config.instance, f"uid:{uid}")
             if verdict["over_budget"]:
                 outcome = "rate_limited"
@@ -323,7 +325,8 @@ def wrap_tool(tool: Any, runtime: BridgeRuntime) -> None:
                     asked = kwargs.get(param, defaults.get(param))
                     if isinstance(asked, int) and not isinstance(asked, bool) and asked > cap:
                         kwargs[param] = cap
-                result = original(*args, **kwargs)
+                with use_field_policy(policy):
+                    result = original(*args, **kwargs)
                 result_filter = _RESULT_FILTERS.get(name)
                 if result_filter is not None:
                     result = result_filter(result)
@@ -355,6 +358,7 @@ def _audit(
 ) -> None:
     model = kwargs.get("model")
     runtime.audit.record(
+        mask=runtime.mask_label(login),
         uid=uid,
         login=login,
         tool=tool,
@@ -383,6 +387,7 @@ def _bridge_health_check(runtime: BridgeRuntime) -> Callable[[], dict[str, Any]]
             "mode": "read-only, per-user",
             "instance": runtime.config.instance,
             "signed_in": {"uid": user.uid, "login": user.login},
+            "mask": runtime.mask_label(user.login),
             "tools": sorted(READ_ALLOWLIST),
             "limits": {
                 "calls_per_minute": runtime.config.calls_per_minute,

@@ -19,7 +19,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from ..field_policy import FIELD_POLICY_FILE_ENV, get_field_policy, reset_field_policy
+from ..field_policy import (
+    FIELD_POLICY_FILE_ENV,
+    FieldPolicy,
+    FieldPolicyError,
+    get_field_policy,
+    load_field_policy_file,
+    reset_field_policy,
+)
 from ..server_core import mcp, report_policy_resolution
 from .client import verify_odoo_login
 from .config import LOCAL_HOSTS, BridgeConfig, BridgeConfigError
@@ -101,6 +108,32 @@ def ensure_field_policy(config: BridgeConfig) -> list[str]:
     return lines
 
 
+def load_login_policies(config: BridgeConfig) -> dict[str, FieldPolicy]:
+    """Load each per-login policy file; refuse to start on any problem.
+
+    Every file must exist, parse, and hold model rules under
+    ``policy_instance``: a login whose file covers nothing would read unmasked.
+    """
+    loaded: dict[str, FieldPolicy] = {}
+    if config.login_policies and config.instance != "production":
+        # Staging is a reclone of production data: one mask for everyone there.
+        raise BridgeConfigError("per-login policies are for the production instance only")
+    for login, path in config.login_policies:
+        if not Path(path).is_file():
+            raise BridgeConfigError(f"per-login policy for {login!r} does not point at a file")
+        try:
+            policy = load_field_policy_file(path)
+        except FieldPolicyError as exc:
+            raise BridgeConfigError(f"per-login policy for {login!r} is invalid: {exc}") from exc
+        if not policy._by_instance.get(config.policy_instance):
+            raise BridgeConfigError(
+                f"per-login policy for {login!r} has no model rules under "
+                f"{config.policy_instance!r}"
+            )
+        loaded[login] = policy
+    return loaded
+
+
 def build_bridge(
     config: BridgeConfig,
     *,
@@ -116,7 +149,9 @@ def build_bridge(
     key = seal_key if seal_key is not None else load_seal_key(config.seal_key_path)
     ensure_field_policy(config)
     ensure_state_dir(config.state_dir)
+    login_policies = load_login_policies(config)
     runtime = runtime or make_runtime(config)
+    runtime.login_policies = login_policies
     runtime.audit.check_writable()
     trusted = TrustedProxies(config.trusted_proxies)
     if config.allowed_logins is None:
@@ -129,6 +164,10 @@ def build_bridge(
             f"odoo-mcp-bridge: sign-in allowlist on: {len(config.allowed_logins)} login(s)",
             file=sys.stderr,
         )
+    print(
+        f"odoo-mcp-bridge: per-login masks: {len(login_policies)} login(s)",
+        file=sys.stderr,
+    )
     provider = BridgeOAuthProvider(
         seal_key=key,
         instance=config.instance,

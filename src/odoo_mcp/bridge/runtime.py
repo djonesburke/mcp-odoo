@@ -18,6 +18,7 @@ from typing import Any
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 
+from ..field_policy import FieldPolicy
 from ..rate_limit import SlidingWindowRateTracker
 from ..schema_cache import BoundedTTLCache, _schema_cache_settings
 from .client import UserClientCache, build_user_client
@@ -84,6 +85,7 @@ class AuditLog:
         records: int | None,
         duration_ms: int,
         outcome: str,
+        mask: str = "instance",
     ) -> None:
         entry = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -96,6 +98,7 @@ class AuditLog:
             "records": records,
             "duration_ms": duration_ms,
             "outcome": outcome,
+            "mask": mask,
         }
         line = json.dumps(entry, sort_keys=True, default=str)
         try:
@@ -115,6 +118,8 @@ class BridgeRuntime:
     client_factory: ClientFactory
     clients: UserClientCache = field(default_factory=UserClientCache)
     limiter: SlidingWindowRateTracker | None = None
+    #: login (lowercased) -> that person's field policy; others use the instance policy.
+    login_policies: dict[str, FieldPolicy] = field(default_factory=dict)
     _schema_caches: dict[int, BoundedTTLCache] = field(default_factory=dict)
     _schema_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -145,6 +150,15 @@ class BridgeRuntime:
             token.expires_at,
             lambda: self.client_factory(token.login, token.odoo_key),
         )
+
+    def policy_for(self, login: str | None) -> FieldPolicy | None:
+        """This login's own field policy, or ``None`` for the instance policy."""
+        if not login:
+            return None
+        return self.login_policies.get(login.strip().lower())
+
+    def mask_label(self, login: str | None) -> str:
+        return "login" if self.policy_for(login) is not None else "instance"
 
     def schema_cache_for(self, uid: int) -> BoundedTTLCache:
         """Field metadata depends on the caller's rights: cache per user."""
