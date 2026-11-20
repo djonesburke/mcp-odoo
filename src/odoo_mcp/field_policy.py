@@ -34,9 +34,11 @@ import json
 import os
 import re
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional, Tuple
 
 from .write_policy import policy_file_path
 
@@ -703,6 +705,11 @@ def load_field_policy() -> FieldPolicy:
     path = field_policy_file_path()
     if path is None:
         return FieldPolicy({})
+    return load_field_policy_file(path)
+
+
+def load_field_policy_file(path: str) -> FieldPolicy:
+    """Load and validate one policy file; raise FieldPolicyError if malformed."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -715,9 +722,35 @@ def load_field_policy() -> FieldPolicy:
 _policy: Optional[FieldPolicy] = None
 _policy_lock = threading.Lock()
 
+#: Per-call override (the hosted bridge's per-login mask). Unset everywhere
+#: else, so the stdio server always reads the process-wide policy.
+_policy_override: ContextVar[Optional[FieldPolicy]] = ContextVar(
+    "odoo_mcp_field_policy_override", default=None
+)
+
+
+@contextmanager
+def use_field_policy(policy: Optional[FieldPolicy]) -> Iterator[None]:
+    """Make ``policy`` the field policy for the current context only.
+
+    ``None`` leaves the process-wide policy in force. The override is reset on
+    exit, so it never outlives the call that set it.
+    """
+    if policy is None:
+        yield
+        return
+    token = _policy_override.set(policy)
+    try:
+        yield
+    finally:
+        _policy_override.reset(token)
+
 
 def get_field_policy() -> FieldPolicy:
-    """Process-wide field policy, loaded lazily and cached."""
+    """The current context's override, else the process-wide policy (lazy, cached)."""
+    override = _policy_override.get()
+    if override is not None:
+        return override
     global _policy
     with _policy_lock:
         if _policy is None:

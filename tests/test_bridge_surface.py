@@ -393,7 +393,7 @@ def test_wrapper_audits_without_values_or_secrets(runtime):
     (line,) = _audit_lines(runtime)
     assert set(line) == {
         "ts", "instance", "uid", "login", "tool", "model", "fields",
-        "records", "duration_ms", "outcome",
+        "records", "duration_ms", "outcome", "mask",
     }  # fmt: skip
     assert line["instance"] == "staging" and line["uid"] == 4
     assert line["login"] == "a@example.com" and line["tool"] == "search_records"
@@ -612,3 +612,178 @@ def test_expired_and_foreign_tokens_get_401(runtime, restore_global_mcp):
         assert status == 401
     finally:
         build.undo()
+
+
+# ------------------------------------------------------------ per-login masks
+
+LOOSE_POLICY = {"field_acl": {"default": {"ir.attachment": {"deny": ["datas"]}}}}
+
+
+def _write_policy(tmp_path, name, data):
+    path = tmp_path / name
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
+def _env_with(runtime, **extra):
+    env = {
+        "ODOO_URL": "https://odoo.example.com",
+        "ODOO_DB": "d",
+        "ODOO_MCP_BRIDGE_INSTANCE": "staging",
+        "ODOO_MCP_BRIDGE_PUBLIC_URL": "https://bridge.example.com",
+        "ODOO_MCP_BRIDGE_SEAL_KEY_FILE": runtime.config.seal_key_path,
+        "ODOO_MCP_BRIDGE_STATE_DIR": runtime.config.state_dir,
+        "ODOO_MCP_BRIDGE_AUDIT_LOG": runtime.config.audit_log,
+    }
+    env.update(extra)
+    return env
+
+
+def test_login_policies_parse_and_normalise(runtime):
+    from odoo_mcp.bridge.config import load_config
+
+    config = load_config(
+        _env_with(
+            runtime,
+            ODOO_MCP_BRIDGE_ALLOWED_LOGINS="A@Example.com,b@example.com",
+            ODOO_MCP_BRIDGE_LOGIN_POLICIES=" A@example.COM = /etc/x/a.json ",
+        )
+    )
+    assert config.login_policies == (("a@example.com", "/etc/x/a.json"),)
+    assert load_config(_env_with(runtime)).login_policies == ()
+
+
+@pytest.mark.parametrize(
+    "allowed,value,message",
+    [
+        ("a@example.com", "", "names no login"),
+        ("a@example.com", "a@example.com", "login=/absolute/path"),
+        ("a@example.com", "=/etc/x.json", "login=/absolute/path"),
+        ("a@example.com", "a@example.com=", "login=/absolute/path"),
+        ("a@example.com", "a@example.com=x.json", "must be absolute"),
+        ("a@example.com", "a@example.com=/a.json,A@example.com=/b.json", "twice"),
+        ("a@example.com", "c@example.com=/c.json", "not on"),
+        (None, "a@example.com=/a.json", "not on"),
+    ],
+)
+def test_login_policies_refuse_ambiguity(runtime, allowed, value, message):
+    from odoo_mcp.bridge.config import BridgeConfigError, load_config
+
+    extra = {"ODOO_MCP_BRIDGE_LOGIN_POLICIES": value}
+    if allowed is not None:
+        extra["ODOO_MCP_BRIDGE_ALLOWED_LOGINS"] = allowed
+    with pytest.raises(BridgeConfigError, match=message):
+        load_config(_env_with(runtime, **extra))
+
+
+@pytest.mark.parametrize(
+    "content,message",
+    [
+        (None, "does not point at a file"),
+        ("{not json", "is invalid"),
+        (json.dumps({"field_acl": {"production": {"res.partner": {"deny": ["x"]}}}}), "no model rules"),
+        (json.dumps({"field_acl": {}}), "no model rules"),
+    ],
+)
+def test_login_policy_files_fail_closed(tmp_path, runtime, restore_global_mcp, content, message):
+    from odoo_mcp.bridge.config import BridgeConfigError
+
+    path = tmp_path / "login.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    config = _config_with(
+        runtime.config,
+        allowed_logins=frozenset({"a@example.com"}),
+        login_policies=(("a@example.com", str(path)),),
+    )
+    with pytest.raises(BridgeConfigError, match=message):
+        build_bridge(config, runtime=runtime, verifier=lambda login, key: 1)
+
+
+def test_override_never_outlives_the_call(field_policy):
+    from odoo_mcp.field_policy import get_field_policy, load_field_policy_file, use_field_policy
+
+    base = get_field_policy()
+    loose = load_field_policy_file(str(_write_policy(field_policy.parent, "l.json", LOOSE_POLICY)))
+    with use_field_policy(None):
+        assert get_field_policy() is base
+    with pytest.raises(RuntimeError):
+        with use_field_policy(loose):
+            assert get_field_policy() is loose
+            raise RuntimeError("boom")
+    assert get_field_policy() is base
+
+
+def test_wrapper_applies_the_login_mask_only_inside_the_call(runtime, field_policy):
+    from odoo_mcp.field_policy import get_field_policy, load_field_policy_file
+
+    loose = load_field_policy_file(str(_write_policy(field_policy.parent, "l.json", LOOSE_POLICY)))
+    runtime.login_policies = {"a@example.com": loose}
+    seen = []
+
+    def search_records(model):
+        seen.append(get_field_policy())
+        return {"success": True}
+
+    tool = _tool(search_records)
+    wrap_tool(tool, runtime)
+    for login in ("A@Example.com", "b@example.com"):
+        tok = _as(_token(1 if login.startswith("A") else 2, login, SECRET_A))
+        try:
+            tool.fn(model="res.partner")
+        finally:
+            auth_context_var.reset(tok)
+    base = get_field_policy()
+    assert seen == [loose, base] and loose is not base
+    assert [x["mask"] for x in _audit_lines(runtime)] == ["login", "instance"]
+
+
+def test_end_to_end_http_per_login_mask(runtime, restore_global_mcp, field_policy):
+    loose = _write_policy(field_policy.parent, "a-policy.json", LOOSE_POLICY)
+    runtime.config = _config_with(
+        runtime.config,
+        allowed_logins=frozenset({"a@example.com", "b@example.com"}),
+        login_policies=(("a@example.com", str(loose)),),
+    )
+    build = build_bridge(runtime.config, runtime=runtime, verifier=lambda login, key: 1)
+    try:
+        tokens = {}
+        for uid, login, key in ((11, "a@example.com", SECRET_A), (12, "b@example.com", SECRET_B)):
+            tokens[login] = build.provider._issue("c", uid, login, key, ["odoo.read"]).access_token
+        rows = {}
+        domain_refused = {}
+        health = {}
+        with TestClient(build.app, base_url="http://localhost") as http:
+            # interleave so a leaked override would show on the next user
+            for login in ("a@example.com", "b@example.com", "a@example.com", "b@example.com"):
+                _, body = _call(
+                    http,
+                    tokens[login],
+                    "search_records",
+                    {"model": "res.partner", "fields": ["name", "credit_limit"]},
+                )
+                rows.setdefault(login, []).append(body["result"]["structuredContent"]["result"])
+                _, body = _call(
+                    http,
+                    tokens[login],
+                    "search_records",
+                    {"model": "res.partner", "fields": ["name"], "domain": [["credit_limit", ">", 0]]},
+                )
+                domain_refused.setdefault(login, []).append(
+                    body["result"]["structuredContent"].get("success") is False
+                )
+                _, body = _call(http, tokens[login], "health_check", {})
+                health[login] = json.loads(body["result"]["content"][0]["text"])["mask"]
+    finally:
+        build.undo()
+
+    for batch in rows["a@example.com"]:
+        assert all("credit_limit" in r for r in batch)  # her own, looser mask
+    for batch in rows["b@example.com"]:
+        assert batch and all("credit_limit" not in r for r in batch)  # instance mask
+    assert domain_refused == {"a@example.com": [False, False], "b@example.com": [True, True]}
+    assert health == {"a@example.com": "login", "b@example.com": "instance"}
+    by_login = {}
+    for line in _audit_lines(runtime):
+        by_login.setdefault(line["login"], set()).add(line["mask"])
+    assert by_login == {"a@example.com": {"login"}, "b@example.com": {"instance"}}
