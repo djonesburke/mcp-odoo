@@ -693,6 +693,7 @@ def test_login_policy_files_fail_closed(tmp_path, runtime, restore_global_mcp, c
         path.write_text(content, encoding="utf-8")
     config = _config_with(
         runtime.config,
+        instance="production",
         allowed_logins=frozenset({"a@example.com"}),
         login_policies=(("a@example.com", str(path)),),
     )
@@ -742,6 +743,7 @@ def test_end_to_end_http_per_login_mask(runtime, restore_global_mcp, field_polic
     loose = _write_policy(field_policy.parent, "a-policy.json", LOOSE_POLICY)
     runtime.config = _config_with(
         runtime.config,
+        instance="production",
         allowed_logins=frozenset({"a@example.com", "b@example.com"}),
         login_policies=(("a@example.com", str(loose)),),
     )
@@ -787,3 +789,17 @@ def test_end_to_end_http_per_login_mask(runtime, restore_global_mcp, field_polic
     for line in _audit_lines(runtime):
         by_login.setdefault(line["login"], set()).add(line["mask"])
     assert by_login == {"a@example.com": {"login"}, "b@example.com": {"instance"}}
+
+
+def test_login_policies_refused_off_production(tmp_path, runtime, restore_global_mcp, field_policy):
+    from odoo_mcp.bridge.config import BridgeConfigError
+
+    loose = _write_policy(field_policy.parent, "a-policy.json", LOOSE_POLICY)
+    config = _config_with(
+        runtime.config,
+        instance="staging",
+        allowed_logins=frozenset({"a@example.com"}),
+        login_policies=(("a@example.com", str(loose)),),
+    )
+    with pytest.raises(BridgeConfigError, match="production instance only"):
+        build_bridge(config, runtime=runtime, verifier=lambda login, key: 1)

@@ -115,6 +115,9 @@ def load_login_policies(config: BridgeConfig) -> dict[str, FieldPolicy]:
     ``policy_instance``: a login whose file covers nothing would read unmasked.
     """
     loaded: dict[str, FieldPolicy] = {}
+    if config.login_policies and config.instance != "production":
+        # Staging is a reclone of production data: one mask for everyone there.
+        raise BridgeConfigError("per-login policies are for the production instance only")
     for login, path in config.login_policies:
         if not Path(path).is_file():
             raise BridgeConfigError(f"per-login policy for {login!r} does not point at a file")
